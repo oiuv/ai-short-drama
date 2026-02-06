@@ -20,24 +20,75 @@ class ChapterReader:
         初始化
         
         Args:
-            novel_path: 小说文件路径或小说目录路径
+            novel_path: 小说文件路径、小说目录路径或章节目录路径
         """
         self.novel_path = Path(novel_path)
         self.encoding = None
+        self.is_chapter_directory = self._detect_chapter_directory()
     
-    def detect_encoding(self) -> str:
+    def _detect_chapter_directory(self) -> bool:
+        """
+        检测是否为章节目录
+        
+        Returns:
+            bool: 是否为章节目录
+        """
+        # 检查路径是否包含chapters目录
+        if 'chapters' in str(self.novel_path):
+            return True
+        
+        # 检查路径是否直接包含.txt文件
+        txt_files = list(self.novel_path.glob('*.txt'))
+        if txt_files:
+            return True
+        
+        return False
+    
+    def detect_encoding(self, filepath=None) -> str:
         """
         检测文件编码
         
+        Args:
+            filepath: 可选的文件路径，如果不提供则使用第一个章节文件
+            
         Returns:
             str: 编码类型（utf-8/gbk/gb18030/gb2312）
         """
         if self.encoding:
             return self.encoding
         
+        # 确定要检测的文件路径
+        test_path = None
+        if filepath:
+            test_path = Path(filepath)
+        else:
+            # 尝试找到第一个章节文件
+            if self.is_chapter_directory:
+                # 如果是章节目录，查找其中的第一个txt文件
+                chapter_files = list(self.novel_path.glob('*.txt'))
+                if chapter_files:
+                    test_path = chapter_files[0]
+            else:
+                # 如果是小说根目录，查找chapters目录下的第一个txt文件
+                chapters_dir = self.novel_path / "chapters"
+                if chapters_dir.exists():
+                    for part_dir in chapters_dir.iterdir():
+                        if part_dir.is_dir():
+                            chapter_files = list(part_dir.glob('*.txt'))
+                            if chapter_files:
+                                test_path = chapter_files[0]
+                                break
+        
+        # 如果找不到测试文件，使用默认编码
+        if not test_path or not test_path.exists():
+            logger.warning("无法找到测试文件，使用默认编码: utf-8")
+            self.encoding = 'utf-8'
+            return 'utf-8'
+        
+        # 尝试不同的编码
         for encoding in ['utf-8', 'gbk', 'gb18030', 'gb2312']:
             try:
-                with open(self.novel_path, 'r', encoding=encoding) as f:
+                with open(test_path, 'r', encoding=encoding) as f:
                     f.read(1000)
                 self.encoding = encoding
                 logger.info(f"检测到文件编码: {encoding}")
@@ -69,38 +120,65 @@ class ChapterReader:
         if not self.novel_path.exists():
             raise FileNotFoundError(f"目录不存在: {self.novel_path}")
         
-        # 查找chapters目录
-        chapters_dir = self.novel_path / "chapters"
-        if not chapters_dir.exists():
-            raise FileNotFoundError(f"chapters目录不存在: {chapters_dir}")
-        
         chapters = []
         
-        # 遍历所有分部目录
-        for part_dir in sorted(chapters_dir.iterdir()):
-            if not part_dir.is_dir():
-                continue
+        if self.is_chapter_directory:
+            # 直接处理章节目录
+            logger.info(f"直接处理章节目录: {self.novel_path}")
             
-            # 从目录名解析分部号（如："第一部"）
-            part_match = re.match(r'第(.+?)部', part_dir.name)
-            if not part_match:
-                continue
+            # 解析分部号
+            part_number = 1
+            part_name = self.novel_path.name
+            part_match = re.match(r'第(.+?)部', part_name)
+            if part_match:
+                cn_part_num = part_match.group(1)
+                part_number = self._cn_num_to_arabic(cn_part_num)
             
-            cn_part_num = part_match.group(1)
-            part_number = self._cn_num_to_arabic(cn_part_num)
-            
-            # 读取该分部下的所有章节文件
-            chapter_files = sorted(part_dir.glob("*.txt"))
+            # 读取该目录下的所有章节文件
+            chapter_files = sorted(self.novel_path.glob("*.txt"))
             
             for chapter_file in chapter_files:
                 chapter_info = self._parse_chapter_filename(chapter_file.name)
                 if chapter_info:
                     chapter_info['part_number'] = part_number
+                    chapter_info['part_title'] = self.novel_path.name
                     chapter_info['filepath'] = str(chapter_file)
                     chapter_info['word_count'] = self._get_word_count(chapter_file)
                     chapters.append(chapter_info)
+        else:
+            # 查找chapters目录
+            chapters_dir = self.novel_path / "chapters"
+            if not chapters_dir.exists():
+                raise FileNotFoundError(f"chapters目录不存在: {chapters_dir}")
+            
+            # 遍历所有分部目录
+            for part_dir in sorted(chapters_dir.iterdir()):
+                if not part_dir.is_dir():
+                    continue
+                
+                # 从目录名解析分部号（如："第一部"）
+                part_match = re.match(r'第(.+?)部', part_dir.name)
+                if not part_match:
+                    continue
+                
+                cn_part_num = part_match.group(1)
+                part_number = self._cn_num_to_arabic(cn_part_num)
+                
+                # 读取该分部下的所有章节文件
+                chapter_files = sorted(part_dir.glob("*.txt"))
+                
+                for chapter_file in chapter_files:
+                    chapter_info = self._parse_chapter_filename(chapter_file.name)
+                    if chapter_info:
+                        chapter_info['part_number'] = part_number
+                        chapter_info['part_title'] = part_dir.name
+                        chapter_info['filepath'] = str(chapter_file)
+                        chapter_info['word_count'] = self._get_word_count(chapter_file)
+                        chapters.append(chapter_info)
         
-        logger.info(f"从目录读取到 {len(chapters)} 个章节")
+        # 按章节号排序
+        chapters.sort(key=lambda x: x['chapter_number'])
+        logger.info(f"从目录读取到 {len(chapters)} 个章节（已按章节号排序）")
         return chapters
     
     def read_chapters_by_range(self, start: int, end: int) -> List[Dict]:
@@ -117,10 +195,14 @@ class ChapterReader:
         all_chapters = self.read_chapters_from_split_directory()
         
         # 按章节号筛选
-        filtered_chapters = [
-            c for c in all_chapters
-            if start <= c['chapter_number'] <= end
-        ]
+        filtered_chapters = []
+        for c in all_chapters:
+            if start <= c['chapter_number'] <= end:
+                # 确保filepath是文件路径
+                if 'filepath' in c and Path(c['filepath']).is_file():
+                    filtered_chapters.append(c)
+                else:
+                    logger.warning(f"章节 {c['chapter_number']} 的文件路径无效: {c.get('filepath')}")
         
         logger.info(f"按范围读取：第{start}章到第{end}章，共{len(filtered_chapters)}章")
         return filtered_chapters
@@ -136,7 +218,19 @@ class ChapterReader:
             str: 章节内容
         """
         path = Path(filepath)
-        encoding = self.detect_encoding() if not self.encoding else self.encoding
+        
+        # 确保路径是文件
+        if path.is_dir():
+            # 尝试从目录中查找章节文件
+            logger.warning(f"路径是目录，尝试查找章节文件: {path}")
+            chapter_files = list(path.glob('*.txt'))
+            if chapter_files:
+                path = chapter_files[0]
+                logger.info(f"使用找到的文件: {path}")
+            else:
+                raise FileNotFoundError(f"目录中没有找到章节文件: {path}")
+        
+        encoding = self.detect_encoding(filepath) if not self.encoding else self.encoding
         
         try:
             with open(path, 'r', encoding=encoding) as f:
@@ -145,6 +239,7 @@ class ChapterReader:
             return content
         except Exception as e:
             logger.error(f"读取章节失败: {e}")
+            logger.error(f"文件路径: {path}")
             raise
     
     def read_multiple_chapters(self, chapter_list: List[Dict]) -> List[Tuple[int, str]]:

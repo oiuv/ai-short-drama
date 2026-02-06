@@ -268,11 +268,16 @@ class PlotSummarizer:
             Optional[RoleInfo]: Role information or None
         """
         import re
-        pattern = re.compile(r'-(.+?)[:：]首次出现在第(.+?)章，角色定位是(.+)')
+        # 更灵活的正则表达式，匹配不同格式的角色信息
+        pattern = re.compile(r'-(.+?)[:：]\s*首次出现在第(.+?)章，\s*角色定位是(.+)')
         match = pattern.search(line)
         
         if not match:
-            return None
+            # 尝试匹配另一种格式
+            pattern2 = re.compile(r'-(.+?)[:：]\s*首次出现于第(.+?)章，\s*角色定位是(.+)')
+            match = pattern2.search(line)
+            if not match:
+                return None
         
         name = match.group(1).strip()
         chapter_str = match.group(2).strip()
@@ -280,6 +285,21 @@ class PlotSummarizer:
         
         # Convert chapter number
         chapter_number = self._cn_num_to_arabic(chapter_str)
+        
+        # 确保章节号不为0且至少为1
+        if chapter_number == 0:
+            # 尝试直接解析数字
+            try:
+                chapter_number = int(chapter_str)
+                # 确保章节号至少为1
+                if chapter_number < 1:
+                    chapter_number = 1
+            except:
+                # 如果解析失败，使用第一个章节号
+                chapter_number = 1
+        # 确保章节号至少为1
+        elif chapter_number < 1:
+            chapter_number = 1
         
         return RoleInfo(
             name=name,

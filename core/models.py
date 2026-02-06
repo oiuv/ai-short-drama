@@ -25,10 +25,48 @@ class Character:
 class RoleInfo:
     """角色信息（从小说中提取）"""
     name: str                              # 角色姓名
-    first_appearance: int                  # 首次出现章节
-    role_type: str                          # 角色定位（主角/配角/反派）
-    description: str                         # 描述
+    first_appearance: int = 0              # 首次出现章节
+    role_type: str = ""                    # 角色定位（主角/配角/反派）
+    description: str = ""                   # 描述
+    age: str = ""                          # 年龄
+    gender: str = ""                       # 性别
+    appearance: str = ""                   # 外貌特征
+    personality: str = ""                  # 性格特点
+    identity: str = ""                     # 身份背景
+    abilities: str = ""                    # 能力设定
     relationships: List[str] = field(default_factory=list)  # 关系列表
+
+@dataclass
+class SettingInfo:
+    """设定信息"""
+    setting_type: str                      # 设定类型（世界观/背景/规则/地点/物品/组织/能力）
+    content: str                           # 设定内容
+
+@dataclass
+class RelationshipInfo:
+    """关系信息"""
+    role_a: str                            # 角色A
+    role_b: str                            # 角色B
+    relationship_type: str                 # 关系类型（朋友/敌人/师徒/亲缘等）
+    strength: int                          # 关系强度（1-10）
+
+@dataclass
+class ThemeInfo:
+    """主题信息"""
+    core_theme: str                        # 核心主题
+    emotional_tone: str                    # 情感基调
+    values: str                            # 价值观表达
+
+@dataclass
+class CoreElements:
+    """核心元素数据模型"""
+    elements_id: str                       # 核心元素ID
+    source_chapters: List[int]             # 来源章节列表
+    roles: List[RoleInfo]                  # 角色信息列表
+    settings: List[SettingInfo]            # 设定信息列表
+    relationships: List[RelationshipInfo]  # 关系信息列表
+    themes: ThemeInfo                      # 主题信息
+    generated_at: datetime = field(default_factory=datetime.now)
 
 @dataclass
 class PlotSummary:

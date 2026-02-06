@@ -43,7 +43,7 @@ class MiniMaxClient:
         
         messages.append({"role": "user", "content": message})
         
-        data = {
+        request_data = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
@@ -52,7 +52,7 @@ class MiniMaxClient:
         
         logger.info(f"Calling MiniMax API: model={model}, tokens={max_tokens}, message length={len(message)}")
         
-        response = self._request("POST", endpoint, json=data)
+        response = self._request("POST", endpoint, data=request_data)
         
         content = response['choices'][0]['message']['content']
         logger.info(f"Response length: {len(content)} characters")
