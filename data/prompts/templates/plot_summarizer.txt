@@ -1,0 +1,5 @@
+请将以下{chapter_count}章小说内容总结为剧情梗概：
+
+{chapter_content}
+
+请按照系统提示词要求的格式输出。

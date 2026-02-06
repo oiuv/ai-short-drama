@@ -1,0 +1,94 @@
+{
+  "current_style": "default",
+  "style_mappings": {
+    "default": {
+      "name": "默认风格（通用）",
+      "description": "适用于各种类型的短剧，不特别强调某种风格",
+      "generators": {
+        "plot_summarizer": "base/default/plot_summarizer.txt",
+        "core_element_extractor": "base/default/core_element_extractor.txt",
+        "storyline_parser": "base/default/storyline_parser.txt",
+        "twist_detector": "base/default/twist_detector.txt",
+        "detailed_outline_generator": "base/default/detailed_outline_generator.txt",
+        "episode_outline_generator": "base/default/episode_outline_generator.txt",
+        "episode_script_generator": "base/default/episode_script_generator.txt",
+        "script_optimizer": "base/default/script_optimizer.txt",
+        "character_card_creator": "base/default/character_card_creator.txt",
+        "storyboard_generator": "base/default/storyboard_generator.txt",
+        "visual_prompt_generator": "base/default/visual_prompt_generator.txt"
+      }
+    },
+    "ancient": {
+      "name": "古风风格",
+      "description": "适用于古风、武侠、仙侠类短剧",
+      "language_style": "半文半白，古韵盎然",
+      "generators": {
+        "plot_summarizer": "base/ancient/plot_summarizer.txt",
+        "core_element_extractor": "base/default/core_element_extractor.txt",
+        "storyline_parser": "base/default/storyline_parser.txt",
+        "twist_detector": "base/default/twist_detector.txt",
+        "detailed_outline_generator": "base/ancient/detailed_outline_generator.txt",
+        "episode_outline_generator": "base/default/episode_outline_generator.txt",
+        "episode_script_generator": "base/ancient/episode_script_generator.txt",
+        "script_optimizer": "base/ancient/script_optimizer.txt",
+        "character_card_creator": "base/ancient/character_card_creator.txt",
+        "storyboard_generator": "base/default/storyboard_generator.txt",
+        "visual_prompt_generator": "base/ancient/visual_prompt_generator.txt"
+      }
+    },
+    "modern": {
+      "name": "现代风格",
+      "description": "适用于现代都市、职场、校园类短剧",
+      "language_style": "口语化，贴近生活",
+      "generators": {
+        "plot_summarizer": "base/modern/plot_summarizer.txt",
+        "core_element_extractor": "base/default/core_element_extractor.txt",
+        "storyline_parser": "base/default/storyline_parser.txt",
+        "twist_detector": "base/default/twist_detector.txt",
+        "detailed_outline_generator": "base/modern/detailed_outline_generator.txt",
+        "episode_outline_generator": "base/default/episode_outline_generator.txt",
+        "episode_script_generator": "base/modern/episode_script_generator.txt",
+        "script_optimizer": "base/modern/script_optimizer.txt",
+        "character_card_creator": "base/modern/character_card_creator.txt",
+        "storyboard_generator": "base/default/storyboard_generator.txt",
+        "visual_prompt_generator": "base/modern/visual_prompt_generator.txt"
+      }
+    },
+    "scifi": {
+      "name": "科幻风格",
+      "description": "适用于科幻、赛博朋克、未来世界类短剧",
+      "language_style": "科技感强，术语准确",
+      "generators": {
+        "plot_summarizer": "base/scifi/plot_summarizer.txt",
+        "core_element_extractor": "base/default/core_element_extractor.txt",
+        "storyline_parser": "base/default/storyline_parser.txt",
+        "twist_detector": "base/default/twist_detector.txt",
+        "detailed_outline_generator": "base/scifi/detailed_outline_generator.txt",
+        "episode_outline_generator": "base/default/episode_outline_generator.txt",
+        "episode_script_generator": "base/scifi/episode_script_generator.txt",
+        "script_optimizer": "base/scifi/script_optimizer.txt",
+        "character_card_creator": "base/scifi/character_card_creator.txt",
+        "storyboard_generator": "base/scifi/storyboard_generator.txt",
+        "visual_prompt_generator": "base/scifi/visual_prompt_generator.txt"
+      }
+    },
+    "wuxia": {
+      "name": "武侠风格",
+      "description": "适用于武侠、江湖类短剧",
+      "language_style": "江湖气息，武侠韵味",
+      "generators": {
+        "plot_summarizer": "base/wuxia/plot_summarizer.txt",
+        "core_element_extractor": "base/default/core_element_extractor.txt",
+        "storyline_parser": "base/default/storyline_parser.txt",
+        "twist_detector": "base/default/twist_detector.txt",
+        "detailed_outline_generator": "base/wuxia/detailed_outline_generator.txt",
+        "episode_outline_generator": "base/default/episode_outline_generator.txt",
+        "episode_script_generator": "base/wuxia/episode_script_generator.txt",
+        "script_optimizer": "base/wuxia/script_optimizer.txt",
+        "character_card_creator": "base/wuxia/character_card_creator.txt",
+        "storyboard_generator": "base/wuxia/storyboard_generator.txt",
+        "visual_prompt_generator": "base/wuxia/visual_prompt_generator.txt"
+      }
+    }
+  }
+}

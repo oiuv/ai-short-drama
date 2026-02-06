@@ -1,0 +1,27 @@
+# 灵影短剧系统依赖包
+
+# 核心依赖
+python-dateutil>=2.8.2
+
+# 数据处理
+pandas>=1.5.0
+numpy>=1.24.0
+
+# 视频处理
+opencv-python>=4.8.0
+ffmpeg-python>=0.2.0
+
+# HTTP请求
+requests>=2.31.0
+
+# 数据验证
+pydantic>=2.0.0
+
+# 进度条
+tqdm>=4.66.0
+
+# 日志
+colorlog>=6.7.0
+
+# 配置管理
+pyyaml>=6.0
