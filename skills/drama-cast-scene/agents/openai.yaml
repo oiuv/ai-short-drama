@@ -1,0 +1,4 @@
+interface:
+  display_name: "影视资产提取"
+  short_description: "从已确认剧本中提取相互解耦并可复用的角色、场景与关键道具资产"
+  default_prompt: "Use $drama-cast-scene to extract production assets from this script."

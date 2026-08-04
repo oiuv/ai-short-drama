@@ -1,0 +1,38 @@
+{
+  "name": "xuefeng-ai-short-drama-studio",
+  "version": "2.0.0",
+  "private": true,
+  "description": "雪风AI短剧工坊：剧本、角色、场景、道具、分镜与剪辑",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:init": "tsx scripts/init-db.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "lucide-react": "^0.468.0",
+    "next": "^16.3.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "sonner": "^1.7.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.3.0",
+    "postcss": "^8.5.25",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}
