@@ -58,6 +58,12 @@ const generatedStoryboardSchema = z.object({
   })).min(1),
 })
 
+const optimizedScriptBriefSchema = z.object({
+  brief: z.string().min(1).max(50_000),
+  genreDetected: z.string().default(''),
+  tips: z.array(z.string()).max(5).default([]),
+})
+
 function extractJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
   try {
@@ -120,6 +126,28 @@ async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function optimizeScriptBrief(input: {
+  brief: string
+  title?: string
+  genre: string
+  visualStyle: string
+  ratio: string
+}) {
+  const systemPrompt = await loadSkillPrompt('script-brief')
+  const visualStyle = resolveVideoStylePrompt(input.visualStyle)
+  const userPrompt = `请使用本 Skill 优化下面的爽剧创作需求，保留用户已经明确的人物、关系、情节、结局和禁忌。只返回符合 Skill 输出契约的 JSON。
+
+剧名：${input.title?.trim() || '暂未命名'}
+题材：${input.genre}
+画面比例：${input.ratio}
+视觉风格：${visualStyle}
+
+用户原始想法或素材：
+${input.brief}`
+
+  return callDeepSeekJson(systemPrompt, userPrompt, optimizedScriptBriefSchema)
 }
 
 export async function generateScript(input: {

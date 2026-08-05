@@ -51,3 +51,6 @@ next-env.d.ts
 
 # workbuddy workspace
 .workbuddy/
+
+# codegraph workspace
+.codegraph/

@@ -84,8 +84,9 @@ AI 分镜 + 逐镜视频
 
 ### 专业爽剧剧本引擎
 
-输入一句故事想法、人物设定、小说片段或已有底稿，DeepSeek 会加载项目内的 `drama-script` Skill，一次生成完整的分集剧本和影视资产档案。
+输入一句故事想法、人物设定、小说片段或已有底稿，可以先用 `script-brief` Skill 一键补全为专业创作需求，再由 DeepSeek 加载 `drama-script` Skill，一次生成完整的分集剧本和影视资产档案。
 
+- 输入再简单也能开始：建立片场时点击“AI 优化需求”，自动补齐主角、对手、故事框架、核心冲突、爽点、关键场景和结局方向，同时保留用户明确的人物、情节与禁忌。
 - 预置都市情感、豪门霸总、婚姻家庭、赘婿逆袭、重生复仇、穿越逆袭、战神归来、神医高手、商战职场、古装权谋、悬疑犯罪、奇幻冒险等题材，也支持自定义题材。
 - 结合爽点模型、题材模式和爆款结构分析，建立人物欲望、核心阻力、失败代价、认知差、冲突升级、局部高潮和集末钩子。
 - 按开端、升级、高潮和结局规划全剧，严格生成指定的 1–20 集连续剧本。
@@ -270,6 +271,9 @@ DATA_DIR=D:\ai-short-drama-data
 
 ```text
 skills/
+├── script-brief/
+│   ├── SKILL.md
+│   └── agents/openai.yaml
 ├── drama-script/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
@@ -285,6 +289,7 @@ skills/
     └── agents/openai.yaml
 ```
 
+- `script-brief`：把一句话或零散故事设定补全为结构化、可编辑的专业爽剧创作需求。
 - `drama-script`：从创作意图到分集剧本，同时建立角色、场景和道具资产档案。
 - `drama-cast-scene`：从已有剧本提取相互解耦的角色造型、无人场景和关键道具。
 - `drama-shot-prompt`：把单集剧本变成适合 Seedance 2.0 的 4–15 秒专业视频片段。
@@ -295,7 +300,7 @@ Skill frontmatter 只使用标准字段 `name` 和 `description`；模型、Toke
 
 | 用途 | 默认模型 | 可配置项 |
 | --- | --- | --- |
-| 剧本、素材档案、分镜拆解 | `deepseek-v4-pro` | `DEEPSEEK_MODEL` |
+| 需求优化、剧本、素材档案、分镜拆解 | `deepseek-v4-pro` | `DEEPSEEK_MODEL` |
 | 角色、场景、道具图片 | `doubao-seedream-5-0-260128` | `SEEDREAM_MODEL` |
 | 分镜视频 | `doubao-seedance-2-0-260128` | `SEEDANCE_MODEL`，界面也可选择 Fast / Mini |
 
@@ -311,6 +316,8 @@ npm run build
 ```
 
 自动化测试覆盖模型 ID、画幅、时长约束、Base64 data URL 解析、本地媒体 URL 编码、Skill 加载和目录穿越防护。真实模型调用需要有效密钥且会产生费用，因此不包含在离线测试中。
+
+测试范围遵循“本地数据安全优先、默认无网络、不过度建设”的原则，详见[本地版自动化测试规范](./docs/dev/testing-strategy.md)。
 
 <details>
 <summary><strong>当前版本边界与安全说明</strong></summary>

@@ -4,12 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Clapperboard, Film, FolderOpen, Plus, Search, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { DEFAULT_PROJECT_GENRE } from '@/config/project-options'
-import { getDefaultVideoStyle } from '@/config/video-styles'
-import type { Project, ProjectListItem } from '@/lib/types'
-import { AspectRatioPicker } from './project-settings/aspect-ratio-picker'
-import { GenrePicker } from './project-settings/genre-picker'
-import { VideoStylePicker } from './project-settings/video-style-picker'
+import type { ProjectListItem } from '@/lib/types'
 import { requestJson } from './studio/client'
 
 const STEP_LABELS = ['剧本', '角色', '场景', '道具', '分镜', '剪辑']
@@ -30,11 +25,6 @@ export function Dashboard() {
   const [projects, setProjects] = useState<ProjectListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState('')
-  const [showCreate, setShowCreate] = useState(false)
-  const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState({
-    title: '', brief: '', genre: String(DEFAULT_PROJECT_GENRE), visualStyle: getDefaultVideoStyle().promptValue, ratio: '9:16',
-  })
 
   const load = async () => {
     setLoading(true)
@@ -55,21 +45,6 @@ export function Dashboard() {
       ? projects.filter(project => `${project.title} ${project.genre}`.toLocaleLowerCase('zh-CN').includes(keyword))
       : projects
   }, [projects, query])
-
-  const create = async () => {
-    if (!form.title.trim()) return toast.error('先给项目起个名字')
-    if (!form.genre.trim()) return toast.error('请选择题材或填写自定义题材')
-    if (!form.visualStyle.trim()) return toast.error('请选择视觉风格')
-    setCreating(true)
-    try {
-      const project = await requestJson<Project>('/api/projects', { method: 'POST', body: JSON.stringify(form) })
-      router.push(`/studio/${project.id}?step=script`)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '创建失败')
-    } finally {
-      setCreating(false)
-    }
-  }
 
   const remove = async (project: ProjectListItem) => {
     if (!window.confirm(`删除《${project.title}》及其本地素材？此操作不可撤销。`)) return
@@ -110,7 +85,7 @@ export function Dashboard() {
                   </li>
                 ))}
               </ol>
-              <button className="btn-primary mt-7 !border-[var(--projector)] !bg-[var(--projector)] !text-[var(--navy)]" onClick={() => setShowCreate(true)}>
+              <button className="btn-primary mt-7 !border-[var(--projector)] !bg-[var(--projector)] !text-[var(--navy)]" onClick={() => router.push('/new')}>
                 <Plus className="h-4 w-4" /> 建立新片场
               </button>
             </div>
@@ -133,7 +108,7 @@ export function Dashboard() {
         {loading ? (
           <div className="panel py-20 text-center text-sm text-[var(--muted)]">正在读取本地片库…</div>
         ) : projects.length === 0 ? (
-          <button onClick={() => setShowCreate(true)} className="panel group flex w-full flex-col items-center border-dashed py-20 text-center hover:border-[var(--projector)]">
+          <button onClick={() => router.push('/new')} className="panel group flex w-full flex-col items-center border-dashed py-20 text-center hover:border-[var(--projector)]">
             <FolderOpen className="mb-4 h-10 w-10 text-[var(--projector)]" />
             <strong className="display-type text-xl">片场还是空的</strong>
             <span className="mt-2 text-sm text-[var(--muted)]">建立第一个项目，从创作需求开始。</span>
@@ -177,41 +152,6 @@ export function Dashboard() {
         )}
       </section>
 
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#09101d]/70 p-4 backdrop-blur-sm" onMouseDown={() => setShowCreate(false)}>
-          <div className="panel scrollbar-thin max-h-[92vh] w-full max-w-5xl overflow-y-auto p-6 md:p-8" onMouseDown={event => event.stopPropagation()}>
-            <div className="label">New production</div>
-            <h2 className="display-type text-3xl font-semibold">建立片场</h2>
-            <p className="mt-2 text-sm text-[var(--muted)]">先确定故事方向与统一画面语言；完整剧本会在第一步由 DeepSeek 生成。</p>
-            <div className="mt-6 grid gap-5 lg:grid-cols-[1fr_360px]">
-              <div className="space-y-5">
-                <label><span className="label">片名</span><input className="field" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="例如：雨夜最后一班车" autoFocus /></label>
-                <div>
-                  <span className="label">题材</span>
-                  <GenrePicker value={form.genre} onChange={genre => setForm({ ...form, genre })} />
-                </div>
-                <label><span className="label">创作想法 / 原始故事</span><textarea className="field min-h-40 resize-y leading-7" value={form.brief} onChange={e => setForm({ ...form, brief: e.target.value })} placeholder="写下一个想法、主要人物、核心冲突与期待的结局…" /></label>
-              </div>
-              <div>
-                <span className="label">画面比例</span>
-                <AspectRatioPicker value={form.ratio} onChange={ratio => setForm({ ...form, ratio })} />
-                <div className="panel-muted mt-4 p-4">
-                  <div className="timecode text-[10px] text-[var(--muted)]">PRODUCTION LOCK</div>
-                  <p className="mt-2 text-xs leading-6 text-[var(--muted)]">画幅会贯穿角色、场景、道具、分镜与最终成片。建立后仍可在剧本页切换横竖屏。</p>
-                </div>
-              </div>
-              <div className="lg:col-span-2">
-                <span className="label">视觉风格</span>
-                <VideoStylePicker value={form.visualStyle} onChange={visualStyle => setForm({ ...form, visualStyle })} />
-              </div>
-            </div>
-            <div className="mt-6 flex justify-end gap-3">
-              <button className="btn-secondary" onClick={() => setShowCreate(false)}>取消</button>
-              <button className="btn-primary" disabled={creating} onClick={() => void create()}><Plus className="h-4 w-4" />{creating ? '正在建立…' : '建立并进入剧本'}</button>
-            </div>
-          </div>
-        </div>
-      )}
     </main>
   )
 }

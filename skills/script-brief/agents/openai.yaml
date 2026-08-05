@@ -1,0 +1,4 @@
+interface:
+  display_name: "爽剧需求优化"
+  short_description: "把一句话或零散设定扩展为可直接用于短剧创作的结构化专业需求"
+  default_prompt: "Use $script-brief to turn my rough short-drama idea into a structured, production-ready creative brief."
