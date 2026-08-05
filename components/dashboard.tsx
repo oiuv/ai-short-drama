@@ -125,8 +125,8 @@ export function Dashboard() {
             <h2 className="display-type text-2xl font-semibold">本地项目</h2>
           </div>
           <label className="relative w-full sm:w-72">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--muted)]" />
-            <input className="field pl-9" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索片名或题材" />
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--muted)]" />
+            <input className="field !pl-10" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索片名或题材" />
           </label>
         </div>
 
