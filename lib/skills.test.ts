@@ -51,6 +51,7 @@ describe('标准影视 Skills', () => {
     expect(prompt).toContain('标准剧集每集写约 10 场完整戏')
     expect(prompt).toContain('情节复杂、多线并行时可扩展到 12–15 场')
     expect(prompt).toContain('同一集内禁止重号、跳号或中途重新从 `[1]` 开始')
+    expect(prompt).toContain('相邻场次之间统一保留一个空行')
     expect(prompt).toContain('爽感 = 消极情绪 × 烈度放大 × 信息差打脸')
     expect(prompt).toContain('每 5 集安排一个小高潮，每 10–20 集安排一个大反转')
     expect(prompt).toContain('角色形象 = 纯净主体')

@@ -95,6 +95,7 @@
 - 未配置 `DEEPSEEK_API_KEY` 或 `VOLCENGINE_API_KEY` 时返回明确错误。
 - AI 服务非 2xx、超时、无效 JSON、缺少必要字段时，不把项目标记为成功。
 - DeepSeek、Seedream 和 Seedance 的 `fetch` 必须 mock；断言请求结构和响应转换，不断言模型文案完全一致。
+- DeepSeek 的流式响应需覆盖正常分片、空 `content`、仅有 `reasoning_content`、`finish_reason=length` 和供应商请求号；公开诊断不得包含 API Key、请求正文、Base64 或完整模型响应。
 - 图片 Base64 和临时视频 URL 的模拟结果必须落到临时 `DATA_DIR`，页面数据只保留本地媒体路径。
 - Seedance 查询接口重复返回同一任务结果时保持幂等。
 - FFmpeg 自动测试只验证参数构造和错误处理；真实编码使用小型 fixture 或发布前人工冒烟，不提交大型媒体文件。

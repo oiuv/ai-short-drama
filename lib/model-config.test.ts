@@ -10,7 +10,7 @@ import {
 } from './model-config'
 
 describe('模型配置', () => {
-  it('默认使用 DeepSeek V4 Flash，并请求该模型的最大输出', () => {
+  it('默认使用 DeepSeek V4 Flash，并请求当前模型的最大输出', () => {
     expect(DEEPSEEK_DEFAULT_MODEL).toBe('deepseek-v4-flash')
     expect(DEEPSEEK_MAX_OUTPUT_TOKENS).toBe(384_000)
   })

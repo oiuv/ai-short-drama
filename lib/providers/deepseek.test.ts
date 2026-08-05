@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { DiagnosticError } from '../diagnostic-error'
 import { DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MAX_OUTPUT_TOKENS } from '../model-config'
 import { generateScript, optimizeScriptBrief } from './deepseek'
 
@@ -50,7 +51,7 @@ describe('DeepSeek provider', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('按参考项目的模型硬上限请求，并接受超过旧限制的需求文本', async () => {
+  it('按当前 DeepSeek 模型的最大输出请求，并接受超过旧限制的需求文本', async () => {
     const optimizedBrief = `【主角设定】\n${'完整设定'.repeat(15_000)}`
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       choices: [{
@@ -84,8 +85,87 @@ describe('DeepSeek provider', () => {
 
     expect(requestBody.model).toBe(DEEPSEEK_DEFAULT_MODEL)
     expect(requestBody.max_tokens).toBe(DEEPSEEK_MAX_OUTPUT_TOKENS)
+    expect(requestBody).toMatchObject({
+      thinking: { type: 'enabled' },
+      stream: true,
+      stream_options: { include_usage: true },
+    })
     expect(requestBody.messages[1]?.content).toContain('雨夜证词')
     expect(result.brief).toBe(optimizedBrief)
+  })
+
+  it('可收集参考项目同款 SSE 流式 JSON 响应', async () => {
+    const optimized = JSON.stringify({
+      brief: '完整爽剧需求',
+      genreDetected: '逆袭',
+      tips: ['强化集末钩子'],
+    })
+    const stream = [
+      `data: ${JSON.stringify({ id: 'deepseek-response-1', choices: [{ delta: { reasoning_content: '分析中' } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: optimized.slice(0, 12) } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: optimized.slice(12) }, finish_reason: 'stop' }] })}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n')
+    const fetchMock = vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'provider-request-1' },
+    }))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await optimizeScriptBrief({
+      brief: '一个普通人逆袭的故事。',
+      genre: '逆袭',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+    })
+
+    expect(result.brief).toBe('完整爽剧需求')
+  })
+
+  it('空内容返回带诊断信息，且日志不泄露密钥和请求正文', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const stream = [
+      `data: ${JSON.stringify({ id: 'deepseek-response-empty', choices: [{ delta: { reasoning_content: '仅有推理' } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n')
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key-secret')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'provider-request-empty' },
+    })))
+
+    let failure: unknown
+    try {
+      await optimizeScriptBrief({
+        brief: '不可写入日志的用户故事正文',
+        genre: '逆袭',
+        visualStyle: '电影感写实',
+        ratio: '9:16',
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(DiagnosticError)
+    expect((failure as DiagnosticError).diagnostics).toMatchObject({
+      provider: 'deepseek',
+      model: DEEPSEEK_DEFAULT_MODEL,
+      phase: 'empty_content',
+      httpStatus: 200,
+      providerRequestId: 'provider-request-empty',
+      providerResponseId: 'deepseek-response-empty',
+      choicesCount: 1,
+      finishReason: 'length',
+      contentLength: 0,
+      reasoningContentLength: 4,
+    })
+    const logged = JSON.stringify(consoleError.mock.calls)
+    expect(logged).not.toContain('test-key-secret')
+    expect(logged).not.toContain('不可写入日志的用户故事正文')
   })
 
   it('续写时传入完整上下文、绝对集数和计划总集数，并规范化资产集号', async () => {
@@ -183,6 +263,32 @@ describe('DeepSeek provider', () => {
     expect(retryBody.messages[1]?.content).toContain('第 1 集只有 3 场，要求 10–15 场')
     expect(retryBody.messages[1]?.content).toContain('不得只补场号')
     expect(result.episodes[0]?.content.match(/^\[\d+\]/gm)).toHaveLength(10)
+  })
+
+  it('模型漏掉场次间空行时在落库前统一补齐', async () => {
+    const compactContent = episodeContent('连续场').replace(/\n\n(?=\[\d+\])/g, '\n')
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => (
+      generatedScriptResponse(compactContent)
+    ))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateScript({
+      title: '雨夜证词',
+      brief: '女记者追查好友失踪案。',
+      genre: '悬疑复仇',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      episodeCount: 1,
+      plannedEpisodes: 10,
+    })
+
+    expect(result.episodes[0]?.content).toContain('林夏：「线索又向前一步。」\n\n[2] 外 连续场2 日')
+    expect(result.episodes[0]?.content).not.toMatch(/[^\n]\n\[\d+\]\s+(?:内|外)/)
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ content: string }>
+    }
+    expect(requestBody.messages[1]?.content).toContain('相邻场次之间必须空一行')
   })
 
   it('用户明确指定较少场数时遵循用户要求而不强制扩写', async () => {

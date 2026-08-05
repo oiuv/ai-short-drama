@@ -35,6 +35,8 @@ This repository is not a continuously operated online service. Runtime applicati
 
 Treat `C:\AI\XuefengAI` as the read-only behavioral and data reference for the scoped 爽剧 film-studio workflow. Inspect it carefully before inventing different field meanings, generation states, step behavior, Skill rules, visual-style data, or bundled style assets. Copy only what belongs to the current product scope; do not copy commercial platform infrastructure along with a feature.
 
+Keep the reference boundary explicit: XuefengAI is authoritative for the scoped workflow, professional Skill standards, prompt/output contracts, quality rules, and relevant product interactions. It is **not** automatically authoritative for this repository's provider, model ID, endpoint, token/context limits, thinking controls, streaming flags, timeouts, or other inference parameters. Those values must be selected for the provider and model actually configured in this project and verified against that provider's current official documentation. Never transplant a parameter merely because it appears in XuefengAI; a commercial route may use a different provider, deployment, model, or operational tradeoff.
+
 When this local project intentionally differs, preserve the local decision instead of blindly matching XuefengAI:
 
 - no accounts, points, OSS, or SaaS operations;
@@ -43,7 +45,7 @@ When this local project intentionally differs, preserve the local decision inste
 - the default LLM is `deepseek-v4-flash` for all current text/Skill calls, with the configured maximum output limit; do not copy XuefengAI's per-feature model routing;
 - image generation uses Seedream 5.0 Lite, and storyboard video uses the Seedance 2.0 series.
 
-Use the relevant official provider documentation under the XuefengAI reference project's `docs/official/` when adapting API contracts, especially where Base64/local storage differs from commercial URL/OSS flows.
+Use the relevant official provider documentation under the XuefengAI reference project's `docs/official/` only when it matches the provider and model used here; otherwise consult the current provider's own official documentation. Provider changes must include mocked request-contract and response-parser tests for the exact current parameters. This is especially important where Base64/local storage differs from commercial URL/OSS flows.
 
 ## Skills & AI Contracts
 

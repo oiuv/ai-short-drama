@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { resolveVideoStylePrompt } from '@/config/video-styles'
+import { DiagnosticError, type PublicDiagnostics } from '../diagnostic-error'
 import {
   DEEPSEEK_DEFAULT_MODEL,
   DEEPSEEK_MAX_OUTPUT_TOKENS,
@@ -89,6 +90,11 @@ async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
   if (!apiKey) throw new Error('未配置 DEEPSEEK_API_KEY')
   const baseUrl = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '')
   const model = process.env.DEEPSEEK_MODEL || DEEPSEEK_DEFAULT_MODEL
+  const diagnosticBase: DeepSeekDiagnosticBase = {
+    diagnosticId: crypto.randomUUID(),
+    model,
+    startedAt: Date.now(),
+  }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 10 * 60 * 1000)
 
@@ -106,27 +112,112 @@ async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
+        thinking: { type: 'enabled' },
         max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
-        stream: false,
+        stream: true,
+        stream_options: { include_usage: true },
       }),
       signal: controller.signal,
     })
-    const raw = await response.text()
-    if (!response.ok) throw new Error(`DeepSeek API 错误 (${response.status}): ${raw.slice(0, 500)}`)
-    const payload = JSON.parse(raw) as {
-      choices?: Array<{ message?: { content?: string } }>
-      error?: { message?: string }
+    const responseMetadata: DeepSeekResponseMetadata = {
+      httpStatus: response.status,
+      contentType: response.headers.get('content-type'),
+      providerRequestId: getProviderRequestId(response),
     }
-    if (payload.error) throw new Error(payload.error.message || 'DeepSeek 调用失败')
-    const content = payload.choices?.[0]?.message?.content
-    if (!content) throw new Error('DeepSeek 返回内容为空')
-    return schema.parse(extractJson(content))
+    if (!response.ok) {
+      const raw = await response.text()
+      let providerMessage = ''
+      let errorCode: string | undefined
+      try {
+        const parsed = asRecord(JSON.parse(raw))
+        const providerError = asRecord(parsed?.error)
+        providerMessage = readString(providerError?.message)
+        errorCode = readString(providerError?.code) || undefined
+      } catch {
+        // 非 JSON 错误响应仍由下方安全摘要记录。
+      }
+      throw createDeepSeekError(
+        `DeepSeek API 错误 (${response.status})${providerMessage ? `：${providerMessage}` : ''}`,
+        diagnosticBase,
+        'http',
+        { ...responseMetadata, rawResponseLength: raw.length, errorCode },
+        raw,
+      )
+    }
+
+    let collected: DeepSeekCollectedResponse
+    try {
+      collected = response.headers.get('content-type')?.includes('text/event-stream')
+        ? await collectStreamResponse(response)
+        : collectJsonResponse(await response.text())
+    } catch (error) {
+      throw createDeepSeekError(
+        'DeepSeek 响应无法解析',
+        diagnosticBase,
+        'response_parse',
+        responseMetadata,
+        undefined,
+        error,
+      )
+    }
+
+    const metadata = { ...responseMetadata, ...collected }
+    if (collected.providerError) {
+      throw createDeepSeekError(
+        collected.providerError.message || 'DeepSeek 调用失败',
+        diagnosticBase,
+        'provider_error',
+        { ...metadata, errorCode: collected.providerError.code },
+      )
+    }
+    if (!collected.content.trim()) {
+      throw createDeepSeekError(
+        'DeepSeek 返回内容为空',
+        diagnosticBase,
+        'empty_content',
+        metadata,
+      )
+    }
+
+    let extracted: unknown
+    try {
+      extracted = extractJson(collected.content)
+    } catch (error) {
+      throw createDeepSeekError(
+        'DeepSeek 未返回有效 JSON',
+        diagnosticBase,
+        'json_parse',
+        metadata,
+        collected.content,
+        error,
+      )
+    }
+    try {
+      return schema.parse(extracted)
+    } catch (error) {
+      if (!(error instanceof z.ZodError)) throw error
+      throw createDeepSeekError(
+        `DeepSeek 返回结构不符合要求：${error.issues[0]?.message || '结构错误'}`,
+        diagnosticBase,
+        'schema_validation',
+        metadata,
+        collected.content,
+        error,
+      )
+    }
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') throw new Error('DeepSeek 请求超时')
-    if (error instanceof z.ZodError) {
-      throw new Error(`DeepSeek 返回结构不符合要求：${error.issues[0]?.message || '结构错误'}`)
+    if (error instanceof DiagnosticError) throw error
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw createDeepSeekError('DeepSeek 请求超时', diagnosticBase, 'timeout', {}, undefined, error)
     }
-    throw error
+    throw createDeepSeekError(
+      `DeepSeek 请求失败：${error instanceof Error ? error.message : '未知错误'}`,
+      diagnosticBase,
+      'network',
+      {},
+      undefined,
+      error,
+    )
   } finally {
     clearTimeout(timer)
   }
@@ -170,6 +261,198 @@ export interface ScriptGenerationInput {
   isFinale?: boolean
 }
 
+type DeepSeekFailurePhase =
+  | 'network'
+  | 'timeout'
+  | 'http'
+  | 'response_parse'
+  | 'provider_error'
+  | 'empty_content'
+  | 'json_parse'
+  | 'schema_validation'
+
+interface DeepSeekDiagnosticBase {
+  diagnosticId: string
+  model: string
+  startedAt: number
+}
+
+interface DeepSeekResponseMetadata {
+  httpStatus?: number
+  contentType?: string | null
+  providerRequestId?: string
+  providerResponseId?: string
+  rawResponseLength?: number
+  streamChunkCount?: number
+  choicesCount?: number
+  finishReason?: string | null
+  contentLength?: number
+  reasoningContentLength?: number
+  errorCode?: string
+}
+
+interface DeepSeekCollectedResponse extends DeepSeekResponseMetadata {
+  content: string
+  reasoningContent: string
+  providerError?: { message?: string; code?: string }
+}
+
+function compactDiagnostics(values: Record<string, string | number | boolean | null | undefined>): PublicDiagnostics {
+  return Object.fromEntries(
+    Object.entries(values).filter((entry): entry is [string, string | number | boolean | null] => entry[1] !== undefined),
+  )
+}
+
+function sanitizeResponsePreview(value: string): string {
+  return value
+    .slice(0, 1_000)
+    .replace(/data:[^;,\s]+;base64,[a-z0-9+/=\r\n]+/gi, 'data:[base64 omitted]')
+    .replace(/\bsk-[a-z0-9_-]{12,}\b/gi, '[api-key omitted]')
+}
+
+function createDeepSeekError(
+  message: string,
+  base: DeepSeekDiagnosticBase,
+  phase: DeepSeekFailurePhase,
+  metadata: DeepSeekResponseMetadata = {},
+  responsePreview?: string,
+  cause?: unknown,
+): DiagnosticError {
+  const diagnostics = compactDiagnostics({
+    diagnosticId: base.diagnosticId,
+    provider: 'deepseek',
+    model: base.model,
+    phase,
+    durationMs: Date.now() - base.startedAt,
+    httpStatus: metadata.httpStatus,
+    contentType: metadata.contentType,
+    providerRequestId: metadata.providerRequestId,
+    providerResponseId: metadata.providerResponseId,
+    rawResponseLength: metadata.rawResponseLength,
+    streamChunkCount: metadata.streamChunkCount,
+    choicesCount: metadata.choicesCount,
+    finishReason: metadata.finishReason,
+    contentLength: metadata.contentLength,
+    reasoningContentLength: metadata.reasoningContentLength,
+    errorCode: metadata.errorCode,
+  })
+  console.error('[雪风AI短剧工坊][DeepSeek] 调用失败', {
+    message,
+    ...diagnostics,
+    ...(responsePreview ? { responsePreview: sanitizeResponsePreview(responsePreview) } : {}),
+  })
+  return new DiagnosticError(message, diagnostics, cause === undefined ? undefined : { cause })
+}
+
+function getProviderRequestId(response: Response): string | undefined {
+  return response.headers.get('x-request-id')
+    || response.headers.get('request-id')
+    || response.headers.get('x-ds-trace-id')
+    || undefined
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function readString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function collectJsonResponse(raw: string): DeepSeekCollectedResponse {
+  const payload = asRecord(JSON.parse(raw)) ?? {}
+  const choices = Array.isArray(payload.choices) ? payload.choices : []
+  const firstChoice = asRecord(choices[0])
+  const message = asRecord(firstChoice?.message)
+  const error = asRecord(payload.error)
+  const content = readString(message?.content)
+  const reasoningContent = readString(message?.reasoning_content)
+
+  return {
+    content,
+    reasoningContent,
+    providerError: error ? {
+      message: readString(error.message) || undefined,
+      code: readString(error.code) || undefined,
+    } : undefined,
+    providerResponseId: readString(payload.id) || undefined,
+    rawResponseLength: raw.length,
+    choicesCount: choices.length,
+    finishReason: typeof firstChoice?.finish_reason === 'string' ? firstChoice.finish_reason : null,
+    contentLength: content.length,
+    reasoningContentLength: reasoningContent.length,
+  }
+}
+
+async function collectStreamResponse(response: Response): Promise<DeepSeekCollectedResponse> {
+  if (!response.body) throw new Error('DeepSeek 流式响应没有 body')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let reasoningContent = ''
+  let providerResponseId: string | undefined
+  let finishReason: string | null = null
+  let rawResponseLength = 0
+  let streamChunkCount = 0
+  let choicesCount = 0
+  let providerError: DeepSeekCollectedResponse['providerError']
+
+  const consumeLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) return
+    const data = trimmed.slice(5).trim()
+    if (!data || data === '[DONE]') return
+
+    const payload = asRecord(JSON.parse(data)) ?? {}
+    providerResponseId ||= readString(payload.id) || undefined
+    const error = asRecord(payload.error)
+    if (error) {
+      providerError = {
+        message: readString(error.message) || undefined,
+        code: readString(error.code) || undefined,
+      }
+    }
+
+    const choices = Array.isArray(payload.choices) ? payload.choices : []
+    choicesCount = Math.max(choicesCount, choices.length)
+    const firstChoice = asRecord(choices[0])
+    const delta = asRecord(firstChoice?.delta)
+    content += readString(delta?.content)
+    reasoningContent += readString(delta?.reasoning_content)
+    if (typeof firstChoice?.finish_reason === 'string') finishReason = firstChoice.finish_reason
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    rawResponseLength += value.byteLength
+    streamChunkCount += 1
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    lines.forEach(consumeLine)
+  }
+  buffer += decoder.decode()
+  if (buffer.trim()) consumeLine(buffer)
+
+  return {
+    content,
+    reasoningContent,
+    providerError,
+    providerResponseId,
+    rawResponseLength,
+    streamChunkCount,
+    choicesCount,
+    finishReason,
+    contentLength: content.length,
+    reasoningContentLength: reasoningContent.length,
+  }
+}
+
 interface SceneCountRange {
   min: number
   max: number
@@ -206,6 +489,23 @@ function parseSceneHeadings(content: string): SceneHeading[] {
       signature: `${match[2]}\u0000${match[3].trim()}\u0000${match[4]}`,
     }]
   })
+}
+
+function normalizeEpisodeSceneSpacing(content: string): string {
+  const lines = content.replace(/\r\n?/g, '\n').trim().split('\n')
+  const normalized: string[] = []
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd()
+    const isSceneHeading = /^\s*\[\d+\]\s+(?:内|外)\s+.+\s+(?:晨|日|昏|夜)\s*$/.test(line)
+    if (isSceneHeading && normalized.length > 0) {
+      while (normalized.at(-1) === '') normalized.pop()
+      normalized.push('')
+    }
+    normalized.push(isSceneHeading ? line.trim() : line)
+  }
+
+  return normalized.join('\n')
 }
 
 function validateEpisodeScenes(
@@ -279,7 +579,7 @@ export async function generateScript(input: ScriptGenerationInput): Promise<Gene
 - 结局要求：${shouldFinale ? `第 ${endEpisode} 集必须是大结局，完整收尾并标记【本剧终】` : '本次最后一集不是大结局，必须保留后续钩子且禁止出现剧终标记'}
 - episodeNumber 必须从 ${startEpisode} 连续递增到 ${endEpisode}，只输出本次生成范围
 - 单集场戏：${sceneCountInstruction}
-- 场号规则：每集 content 内必须从 [1] 开始连续递增，不得重号、跳号或中途重置；同一地点与时间的连续内容必须合并，不得拆场凑数。`
+- 场号规则：每集 content 内必须从 [1] 开始连续递增，不得重号、跳号或中途重置；同一地点与时间的连续内容必须合并，不得拆场凑数；相邻场次之间必须空一行。`
 
   const userPrompt = `请使用本 Skill 完成以下爽剧创作，并严格遵循 Skill 的 JSON 输出契约。
 
@@ -333,6 +633,7 @@ ${sceneIssues.map(issue => `- ${issue}`).join('\n')}
     episodes: orderedEpisodes.map((episode, index) => ({
       ...episode,
       episodeNumber: startEpisode + index,
+      content: normalizeEpisodeSceneSpacing(episode.content),
     })),
     characters: generated.characters.flatMap(character => character.looks.map(look => ({
       name: character.name,
