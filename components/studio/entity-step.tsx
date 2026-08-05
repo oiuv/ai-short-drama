@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { ImagePlus, Loader2, Plus, RefreshCw, Sparkles, Trash2, Upload } from 'lucide-react'
 import { toast } from 'sonner'
+import { confirmToast } from '@/components/confirm-toast'
 import type { Entity, EntityKind, ProjectBundle } from '@/lib/types'
 import { fileAsDataUrl, requestJson } from './client'
 
@@ -14,7 +15,7 @@ interface Props {
 
 const CONFIG = {
   character: { title: '角色造型', eyebrow: 'Cast bible', empty: '剧本生成后会自动整理角色；也可以手动添加造型。', accent: '#8b7cf7' },
-  scene: { title: '无人场景', eyebrow: 'Location bible', empty: '在这里建立可重复使用的空间与光线设定。', accent: '#41a99e' },
+  scene: { title: '空镜场景', eyebrow: 'Location bible', empty: '在这里建立可重复使用的空间与光线设定。', accent: '#41a99e' },
   prop: { title: '关键道具', eyebrow: 'Prop bible', empty: '只保留跨镜头需要维持一致的关键物件。', accent: '#d79833' },
 } as const
 
@@ -63,7 +64,12 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
   }
 
   const remove = async (entity: Entity) => {
-    if (!window.confirm(`删除“${entity.name}${entity.variant ? ` / ${entity.variant}` : ''}”及其图片版本？`)) return
+    const entityLabel = `${entity.name}${entity.variant ? ` / ${entity.variant}` : ''}`
+    if (!await confirmToast({
+      title: `删除“${entityLabel}”？`,
+      description: '该素材档案及其所有图片版本记录都会被删除，此操作不可撤销。',
+      confirmLabel: '删除素材',
+    })) return
     try {
       await requestJson(`/api/projects/${bundle.project.id}/entities?entityId=${entity.id}`, { method: 'DELETE' })
       await refresh(true)
@@ -92,7 +98,12 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
   const batchGenerate = async () => {
     const pending = entities.filter(entity => !entity.selectedImage)
     if (!pending.length) return toast.info('所有素材都已有选定图片')
-    if (!window.confirm(`将依次为 ${pending.length} 个素材生成图片。继续吗？`)) return
+    if (!await confirmToast({
+      title: `批量生成 ${pending.length} 个素材？`,
+      description: '任务将依次调用 Seedream 生成图片，期间请保持应用运行。',
+      confirmLabel: '开始生成',
+      tone: 'warning',
+    })) return
     setBatching(true)
     let succeeded = 0
     for (const entity of pending) {

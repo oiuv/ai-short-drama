@@ -1,4 +1,4 @@
 interface:
-  display_name: "专业短剧编剧"
-  short_description: "将想法、故事或小说素材创作为结构完整且可直接拍摄的专业短剧剧本"
-  default_prompt: "Use $drama-script to turn my story idea into a production-ready short-drama script."
+  display_name: "爽剧短剧编剧"
+  short_description: "基于专业爽点模型，将想法或故事创作为可直接拍摄的完整爽剧剧本"
+  default_prompt: "Use $drama-script to turn my story idea into a production-ready high-impact Chinese vertical drama script."

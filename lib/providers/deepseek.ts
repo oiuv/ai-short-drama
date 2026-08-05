@@ -1,6 +1,10 @@
 import { z } from 'zod'
 import { resolveVideoStylePrompt } from '@/config/video-styles'
-import { DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MAX_OUTPUT_TOKENS } from '../model-config'
+import {
+  DEEPSEEK_DEFAULT_MODEL,
+  DEEPSEEK_MAX_OUTPUT_TOKENS,
+  MAX_SCRIPT_EPISODES_PER_REQUEST,
+} from '../model-config'
 import type { GeneratedScript, GeneratedStoryboard } from '../types'
 import { loadSkillPrompt } from '../skills'
 
@@ -150,7 +154,7 @@ ${input.brief}`
   return callDeepSeekJson(systemPrompt, userPrompt, optimizedScriptBriefSchema)
 }
 
-export async function generateScript(input: {
+export interface ScriptGenerationInput {
   title: string
   brief: string
   synopsis?: string
@@ -158,31 +162,178 @@ export async function generateScript(input: {
   visualStyle: string
   ratio: string
   episodeCount: number
-}): Promise<GeneratedScript> {
+  plannedEpisodes: number | null
+  mode?: 'generate' | 'continue' | 'rewrite'
+  startEpisode?: number
+  existingEpisodes?: Array<{ episodeNumber: number; title: string; content: string }>
+  instruction?: string
+  isFinale?: boolean
+}
+
+interface SceneCountRange {
+  min: number
+  max: number
+  source: 'default' | 'user'
+}
+
+interface SceneHeading {
+  number: number
+  signature: string
+}
+
+function resolveSceneCountRange(input: ScriptGenerationInput): SceneCountRange {
+  const requirements = `${input.brief}\n${input.instruction ?? ''}`
+  const rangeMatch = requirements.match(/(?:每集|单集|每一集)[^\n。；]{0,20}?(\d{1,2})\s*[-–—~至到]\s*(\d{1,2})\s*场/)
+  if (rangeMatch) {
+    const left = Math.max(1, Math.min(30, Number(rangeMatch[1])))
+    const right = Math.max(1, Math.min(30, Number(rangeMatch[2])))
+    return { min: Math.min(left, right), max: Math.max(left, right), source: 'user' }
+  }
+  const exactMatch = requirements.match(/(?:每集|单集|每一集)[^\n。；]{0,20}?(\d{1,2})\s*场/)
+  if (exactMatch) {
+    const count = Math.max(1, Math.min(30, Number(exactMatch[1])))
+    return { min: count, max: count, source: 'user' }
+  }
+  return { min: 10, max: 15, source: 'default' }
+}
+
+function parseSceneHeadings(content: string): SceneHeading[] {
+  return content.split(/\r?\n/).flatMap(line => {
+    const match = line.trim().match(/^\[(\d+)\]\s+(内|外)\s+(.+?)\s+(晨|日|昏|夜)$/)
+    if (!match) return []
+    return [{
+      number: Number(match[1]),
+      signature: `${match[2]}\u0000${match[3].trim()}\u0000${match[4]}`,
+    }]
+  })
+}
+
+function validateEpisodeScenes(
+  episodes: Array<{ content: string }>,
+  startEpisode: number,
+  sceneCountRange: SceneCountRange,
+): string[] {
+  const issues: string[] = []
+  episodes.forEach((episode, index) => {
+    const episodeNumber = startEpisode + index
+    const headings = parseSceneHeadings(episode.content)
+    if (headings.length < sceneCountRange.min || headings.length > sceneCountRange.max) {
+      issues.push(`第 ${episodeNumber} 集只有 ${headings.length} 场，要求 ${sceneCountRange.min === sceneCountRange.max ? `${sceneCountRange.min} 场` : `${sceneCountRange.min}–${sceneCountRange.max} 场`}`)
+    }
+    if (!headings.every((heading, headingIndex) => heading.number === headingIndex + 1)) {
+      issues.push(`第 ${episodeNumber} 集场号必须从 [1] 开始连续递增，且不得中途重置`)
+    }
+    const repeatedScene = headings.find((heading, headingIndex) => (
+      headingIndex > 0 && heading.signature === headings[headingIndex - 1]?.signature
+    ))
+    if (repeatedScene) issues.push(`第 ${episodeNumber} 集存在连续相同地点与时间的拆场，必须合并`)
+  })
+  return issues
+}
+
+function normalizeGeneratedEpisodeReferences(
+  episodes: number[],
+  startEpisode: number,
+  episodeCount: number,
+  relativeNumbering: boolean,
+): number[] {
+  const endEpisode = startEpisode + episodeCount - 1
+  return [...new Set(episodes.map(episode => {
+    if (relativeNumbering && episode >= 1 && episode <= episodeCount) return startEpisode + episode - 1
+    if (episode >= startEpisode && episode <= endEpisode) return episode
+    if (episode >= 1 && episode <= episodeCount) return startEpisode + episode - 1
+    return episode
+  }).filter(episode => episode >= startEpisode && episode <= endEpisode))].sort((a, b) => a - b)
+}
+
+export async function generateScript(input: ScriptGenerationInput): Promise<GeneratedScript> {
+  if (!Number.isInteger(input.episodeCount) || input.episodeCount < 1 || input.episodeCount > MAX_SCRIPT_EPISODES_PER_REQUEST) {
+    throw new Error(`单次剧本创作集数必须是 1–${MAX_SCRIPT_EPISODES_PER_REQUEST} 的整数`)
+  }
+
   const systemPrompt = await loadSkillPrompt('drama-script')
   const visualStyle = resolveVideoStylePrompt(input.visualStyle)
+  const mode = input.mode ?? 'generate'
+  const startEpisode = input.startEpisode ?? 1
+  const endEpisode = startEpisode + input.episodeCount - 1
+  const existingEpisodeCount = input.existingEpisodes?.length ?? 0
+  const sceneCountRange = resolveSceneCountRange(input)
+  const sceneCountInstruction = sceneCountRange.source === 'user'
+    ? `每集必须为 ${sceneCountRange.min === sceneCountRange.max ? `${sceneCountRange.min} 场` : `${sceneCountRange.min}–${sceneCountRange.max} 场`}，这是用户明确要求`
+    : '标准剧集每集写 10 场完整戏；情节复杂、多线并行时可写 12–15 场'
+  const plannedEpisodesText = input.plannedEpisodes === null ? '不设定（开放式长剧）' : `${input.plannedEpisodes} 集`
+  const shouldFinale = input.isFinale === true
+    || (input.plannedEpisodes !== null && endEpisode >= input.plannedEpisodes)
+  const existingScript = input.existingEpisodes?.map(episode =>
+    `第 ${episode.episodeNumber} 集${episode.title ? `：${episode.title}` : ''}\n${episode.content}`
+  ).join('\n\n') ?? ''
+  const taskInstruction = mode === 'continue'
+    ? `这是续写任务。已有剧本保持不变，只创作第 ${startEpisode}–${endEpisode} 集，并保证人物、设定、时间线和爽点递进连续。`
+    : mode === 'rewrite'
+      ? `这是指定分集重写任务。只重写第 ${startEpisode}–${endEpisode} 集，其他已有分集不得改写；新内容必须与前后集自然衔接。`
+      : `这是首次创作任务。创作第 ${startEpisode}–${endEpisode} 集。`
+  const episodeControl = `【集数控制指令】
+- 本次生成：第 ${startEpisode} 集到第 ${endEpisode} 集，共 ${input.episodeCount} 集
+- 已生成集数：${existingEpisodeCount} 集
+- 计划总集数：${plannedEpisodesText}
+- 结局要求：${shouldFinale ? `第 ${endEpisode} 集必须是大结局，完整收尾并标记【本剧终】` : '本次最后一集不是大结局，必须保留后续钩子且禁止出现剧终标记'}
+- episodeNumber 必须从 ${startEpisode} 连续递增到 ${endEpisode}，只输出本次生成范围
+- 单集场戏：${sceneCountInstruction}
+- 场号规则：每集 content 内必须从 [1] 开始连续递增，不得重号、跳号或中途重置；同一地点与时间的连续内容必须合并，不得拆场凑数。`
 
-  const userPrompt = `请使用本 Skill 完成以下短剧创作。分集数量必须精确等于 ${input.episodeCount}，episodeNumber 从 1 连续递增，并严格遵循 Skill 的 JSON 输出契约。
+  const userPrompt = `请使用本 Skill 完成以下爽剧创作，并严格遵循 Skill 的 JSON 输出契约。
+
+${taskInstruction}
+
+${episodeControl}
 
 剧名：${input.title || '由你拟定'}
 题材：${input.genre}
-集数：${input.episodeCount}
 画面比例：${input.ratio}
 视觉风格：${visualStyle}
 已有梗概：${input.synopsis || '无'}
 创作需求或原始素材：
-${input.brief}`
-  const generated = await callDeepSeekJson(systemPrompt, userPrompt, generatedScriptSchema)
+${input.brief}
+${input.instruction?.trim() ? `\n【本次${mode === 'rewrite' ? '重写' : '续写'}指导】\n${input.instruction.trim()}\n` : ''}
+${existingScript ? `\n【全部已有剧本内容】\n${existingScript}` : ''}`
+  let generated = await callDeepSeekJson(systemPrompt, userPrompt, generatedScriptSchema)
   if (generated.episodes.length !== input.episodeCount) {
     throw new Error(`Skill 返回 ${generated.episodes.length} 集，要求为 ${input.episodeCount} 集`)
   }
+  let sceneIssues = validateEpisodeScenes(generated.episodes, startEpisode, sceneCountRange)
+  if (sceneIssues.length > 0) {
+    const correctionPrompt = `${userPrompt}
+
+【上一次输出未通过单集体量检查，必须完整重新创作】
+${sceneIssues.map(issue => `- ${issue}`).join('\n')}
+- 不得只补场号或把同一连续场景拆开凑数；每一场都要有真实的地点/时间切换和完整戏剧作用。
+- 重新输出完整 JSON，不要解释修改过程。`
+    generated = await callDeepSeekJson(systemPrompt, correctionPrompt, generatedScriptSchema)
+    if (generated.episodes.length !== input.episodeCount) {
+      throw new Error(`Skill 纠正后返回 ${generated.episodes.length} 集，要求为 ${input.episodeCount} 集`)
+    }
+    sceneIssues = validateEpisodeScenes(generated.episodes, startEpisode, sceneCountRange)
+    if (sceneIssues.length > 0) throw new Error(`剧本单集体量不合格：${sceneIssues.join('；')}`)
+  }
+  const orderedEpisodes = [...generated.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber)
+  const relativeNumbering = startEpisode > 1
+    && orderedEpisodes.every((episode, index) => episode.episodeNumber === index + 1)
+  const normalizeReferences = (episodes: number[]) => normalizeGeneratedEpisodeReferences(
+    episodes,
+    startEpisode,
+    input.episodeCount,
+    relativeNumbering,
+  )
   return {
     project: {
       title: generated.summary.title,
       synopsis: generated.summary.synopsis,
       genre: generated.summary.genre || input.genre,
     },
-    episodes: generated.episodes,
+    episodes: orderedEpisodes.map((episode, index) => ({
+      ...episode,
+      episodeNumber: startEpisode + index,
+    })),
     characters: generated.characters.flatMap(character => character.looks.map(look => ({
       name: character.name,
       variant: look.name || '默认形象',
@@ -191,10 +342,16 @@ ${input.brief}`
       introduction: character.introduction,
       voiceDescription: look.voiceDescription || character.voiceDescription,
       description: look.description,
-      episodes: look.episodes,
+      episodes: normalizeReferences(look.episodes),
     }))),
-    scenes: generated.scenes,
-    props: generated.props,
+    scenes: generated.scenes.map(scene => ({
+      ...scene,
+      episodes: normalizeReferences(scene.episodes),
+    })),
+    props: generated.props.map(prop => ({
+      ...prop,
+      episodes: normalizeReferences(prop.episodes),
+    })),
   }
 }
 

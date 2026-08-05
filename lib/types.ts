@@ -10,6 +10,7 @@ export interface Project {
   genre: string
   visualStyle: string
   ratio: string
+  plannedEpisodes: number | null
   createdAt: string
   updatedAt: string
 }

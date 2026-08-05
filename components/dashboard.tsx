@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Clapperboard, Film, FolderOpen, Plus, Search, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
+import { confirmToast } from '@/components/confirm-toast'
 import type { ProjectListItem } from '@/lib/types'
 import { requestJson } from './studio/client'
 
@@ -47,7 +48,11 @@ export function Dashboard() {
   }, [projects, query])
 
   const remove = async (project: ProjectListItem) => {
-    if (!window.confirm(`删除《${project.title}》及其本地素材？此操作不可撤销。`)) return
+    if (!await confirmToast({
+      title: '删除整个项目？',
+      description: `《${project.title}》的剧本、素材档案、分镜和剪辑记录将被删除，此操作不可撤销。`,
+      confirmLabel: '删除项目',
+    })) return
     try {
       await requestJson(`/api/projects/${project.id}`, { method: 'DELETE' })
       setProjects(current => current.filter(item => item.id !== project.id))

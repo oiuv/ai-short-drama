@@ -3,7 +3,7 @@ import type { Entity, EntityKind, Project } from './types'
 
 const KIND_LABELS: Record<EntityKind, string> = {
   character: '角色造型设定',
-  scene: '无人场景设定',
+  scene: '空镜场景设定',
   prop: '关键道具设定',
 }
 

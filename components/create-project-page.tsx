@@ -13,7 +13,7 @@ import { GenrePicker } from './project-settings/genre-picker'
 import { VideoStylePicker } from './project-settings/video-style-picker'
 import { requestJson } from './studio/client'
 
-const CREATION_STEPS = ['专业剧本', '角色造型', '无人场景', '关键道具', '分镜视频', '剪辑成片']
+const CREATION_STEPS = ['专业剧本', '角色造型', '空镜场景', '关键道具', '分镜视频', '剪辑成片']
 
 const BRIEF_PLACEHOLDER = `描述你想要的短剧内容，简单想法也可以，点击右上角「AI 优化需求」自动扩写。
 

@@ -1,6 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MAX_OUTPUT_TOKENS } from '../model-config'
-import { optimizeScriptBrief } from './deepseek'
+import { generateScript, optimizeScriptBrief } from './deepseek'
+
+function episodeContent(locationPrefix: string, sceneCount = 10): string {
+  const times = ['晨', '日', '昏', '夜']
+  return Array.from({ length: sceneCount }, (_, index) => {
+    const sceneNumber = index + 1
+    const interior = index % 2 === 0 ? '内' : '外'
+    return `[${sceneNumber}] ${interior} ${locationPrefix}${sceneNumber} ${times[index % times.length]}\n人物：林夏\n△ 林夏在此处推进第${sceneNumber}个行动。\n林夏：「线索又向前一步。」`
+  }).join('\n\n')
+}
+
+function generatedScriptResponse(content: string): Response {
+  return new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          summary: { title: '雨夜证词', synopsis: '林夏追查真相。', genre: '悬疑复仇' },
+          episodes: [{ episodeNumber: 1, title: '追查', content }],
+          characters: [],
+          scenes: [],
+          props: [],
+        }),
+      },
+    }],
+  }), { status: 200 })
+}
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -8,6 +33,23 @@ afterEach(() => {
 })
 
 describe('DeepSeek provider', () => {
+  it('在请求模型前拒绝单次创作超过 10 集', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(generateScript({
+      title: '雨夜证词',
+      brief: '女记者追查好友失踪案。',
+      genre: '悬疑复仇',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      episodeCount: 11,
+      plannedEpisodes: 20,
+    })).rejects.toThrow('单次剧本创作集数必须是 1–10 的整数')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('按参考项目的模型硬上限请求，并接受超过旧限制的需求文本', async () => {
     const optimizedBrief = `【主角设定】\n${'完整设定'.repeat(15_000)}`
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
@@ -44,5 +86,126 @@ describe('DeepSeek provider', () => {
     expect(requestBody.max_tokens).toBe(DEEPSEEK_MAX_OUTPUT_TOKENS)
     expect(requestBody.messages[1]?.content).toContain('雨夜证词')
     expect(result.brief).toBe(optimizedBrief)
+  })
+
+  it('续写时传入完整上下文、绝对集数和计划总集数，并规范化资产集号', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            summary: {
+              title: '雨夜证词',
+              synopsis: '林夏继续追查雨夜真相。',
+              genre: '悬疑复仇',
+            },
+            episodes: [
+              { episodeNumber: 1, title: '旧证人', content: episodeContent('旧仓库') },
+              { episodeNumber: 2, title: '真相一角', content: episodeContent('河岸') },
+            ],
+            characters: [{
+              name: '林夏',
+              role: 'protagonist',
+              gender: 'female',
+              introduction: '记者',
+              voiceDescription: '冷静清晰',
+              looks: [{ name: '默认形象', description: '短发，深色风衣，全身站立', episodes: [1, 2] }],
+            }],
+            scenes: [{ name: '旧仓库_夜晚', description: '空旷旧仓库，冷色顶光', episodes: [1, 2] }],
+            props: [{ name: '录音笔', category: 'item', description: '银色旧录音笔', episodes: [2] }],
+          }),
+        },
+      }],
+    }), { status: 200 }))
+
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateScript({
+      title: '雨夜证词',
+      brief: '女记者追查好友失踪案。',
+      synopsis: '前三集发现了被篡改的证词。',
+      genre: '悬疑复仇',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      mode: 'continue',
+      startEpisode: 4,
+      episodeCount: 2,
+      plannedEpisodes: 10,
+      existingEpisodes: [
+        { episodeNumber: 1, title: '失踪', content: '第一集完整内容' },
+        { episodeNumber: 2, title: '伪证', content: '第二集完整内容' },
+        { episodeNumber: 3, title: '雨夜', content: '第三集完整内容' },
+      ],
+      instruction: '让旧证人出现，但暂时不要揭晓幕后主使。',
+    })
+
+    const requestInit = fetchMock.mock.calls[0]?.[1]
+    const requestBody = JSON.parse(String(requestInit?.body)) as {
+      messages: Array<{ role: string; content: string }>
+    }
+    const userPrompt = requestBody.messages[1]?.content ?? ''
+
+    expect(userPrompt).toContain('这是续写任务')
+    expect(userPrompt).toContain('本次生成：第 4 集到第 5 集，共 2 集')
+    expect(userPrompt).toContain('已生成集数：3 集')
+    expect(userPrompt).toContain('计划总集数：10 集')
+    expect(userPrompt).toContain('第三集完整内容')
+    expect(userPrompt).toContain('让旧证人出现')
+    expect(userPrompt).toContain('禁止出现剧终标记')
+    expect(result.episodes.map(episode => episode.episodeNumber)).toEqual([4, 5])
+    expect(result.characters[0]?.episodes).toEqual([4, 5])
+    expect(result.scenes[0]?.episodes).toEqual([4, 5])
+    expect(result.props[0]?.episodes).toEqual([5])
+  })
+
+  it('单集不足默认场数时自动要求 DeepSeek 完整重写一次', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(generatedScriptResponse(episodeContent('短场', 3)))
+      .mockResolvedValueOnce(generatedScriptResponse(episodeContent('完整场')))
+
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateScript({
+      title: '雨夜证词',
+      brief: '女记者追查好友失踪案。',
+      genre: '悬疑复仇',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      episodeCount: 1,
+      plannedEpisodes: 10,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const retryBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ content: string }>
+    }
+    expect(retryBody.messages[1]?.content).toContain('第 1 集只有 3 场，要求 10–15 场')
+    expect(retryBody.messages[1]?.content).toContain('不得只补场号')
+    expect(result.episodes[0]?.content.match(/^\[\d+\]/gm)).toHaveLength(10)
+  })
+
+  it('用户明确指定较少场数时遵循用户要求而不强制扩写', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => (
+      generatedScriptResponse(episodeContent('限定场', 3))
+    ))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    await generateScript({
+      title: '三场试炼',
+      brief: '每集3场戏，三场都要有完整冲突。',
+      genre: '逆袭',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      episodeCount: 1,
+      plannedEpisodes: 10,
+    })
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ content: string }>
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(requestBody.messages[1]?.content).toContain('每集必须为 3 场，这是用户明确要求')
   })
 })

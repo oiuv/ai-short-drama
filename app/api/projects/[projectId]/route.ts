@@ -11,6 +11,7 @@ const updateSchema = z.object({
   genre: z.string().trim().min(1).max(80).optional(),
   visualStyle: z.string().trim().min(1).max(500).optional(),
   ratio: z.enum(['16:9', '9:16']).optional(),
+  plannedEpisodes: z.number().int().min(1).max(200).nullable().optional(),
 })
 
 export async function GET(_: Request, { params }: { params: Promise<{ projectId: string }> }) {

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Clapperboard, Loader2, Plus, Save, Sparkles, Trash2, Video } from 'lucide-react'
 import { toast } from 'sonner'
+import { confirmToast } from '@/components/confirm-toast'
 import { SEEDANCE_MODELS } from '@/lib/model-config'
 import type { Entity, ProjectBundle, Shot } from '@/lib/types'
 import { requestJson } from './client'
@@ -55,7 +56,11 @@ export function StoryboardStep({ bundle, refresh }: Props) {
 
   const split = async () => {
     if (!episode) return
-    if (shots.length && !window.confirm('重新拆分会删除本集现有分镜及视频版本。继续吗？')) return
+    if (shots.length && !await confirmToast({
+      title: '重新拆分本集分镜？',
+      description: '本集现有镜头及其全部视频版本都会被删除，此操作不可撤销。',
+      confirmLabel: '重新拆分',
+    })) return
     setSplitting(true)
     try {
       const next = await requestJson<Shot[]>(`/api/projects/${bundle.project.id}/storyboard`, {
@@ -98,7 +103,12 @@ export function StoryboardStep({ bundle, refresh }: Props) {
   const batchGenerate = async () => {
     const pending = shots.filter(shot => shot.status !== 'generating' && shot.prompt.trim())
     if (!pending.length) return toast.info('没有可提交的分镜')
-    if (!window.confirm(`将提交 ${pending.length} 个 Seedance 视频任务，按 2 个一组控制并发。继续吗？`)) return
+    if (!await confirmToast({
+      title: `提交 ${pending.length} 个视频任务？`,
+      description: 'Seedance 任务将按每组 2 个控制并发，提交后可在分镜列表查看进度。',
+      confirmLabel: '确认提交',
+      tone: 'warning',
+    })) return
     setBatching(true)
     let succeeded = 0
     for (let index = 0; index < pending.length; index += 2) {
@@ -186,7 +196,11 @@ function ShotCard({ shot, entities, refresh, onGenerate }: {
   }
 
   const remove = async () => {
-    if (!window.confirm(`删除镜头 ${shot.shotOrder} 及其所有视频版本？`)) return
+    if (!await confirmToast({
+      title: `删除镜头 ${shot.shotOrder}？`,
+      description: '该镜头及其全部 Seedance 视频版本都会被删除，此操作不可撤销。',
+      confirmLabel: '删除镜头',
+    })) return
     try {
       await requestJson(`/api/shots/${shot.id}`, { method: 'DELETE' })
       await refresh(true)

@@ -52,6 +52,7 @@ function initialize(db: Database.Database): void {
       genre TEXT NOT NULL DEFAULT '短剧',
       visual_style TEXT NOT NULL DEFAULT '电影感写实风格',
       ratio TEXT NOT NULL DEFAULT '9:16',
+      planned_episodes INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -155,6 +156,9 @@ function projectFromRow(row: SqlRow): Project {
     genre: String(row.genre ?? ''),
     visualStyle: String(row.visual_style ?? ''),
     ratio: String(row.ratio ?? '9:16'),
+    plannedEpisodes: row.planned_episodes === null || row.planned_episodes === undefined
+      ? null
+      : Number(row.planned_episodes),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   }
@@ -245,8 +249,8 @@ export function createProject(input: Partial<Project> & { title: string }): Proj
   const id = randomUUID()
   const timestamp = now()
   db.prepare(`
-    INSERT INTO projects (id, title, brief, synopsis, genre, visual_style, ratio, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO projects (id, title, brief, synopsis, genre, visual_style, ratio, planned_episodes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.title.trim() || '未命名项目',
@@ -255,6 +259,7 @@ export function createProject(input: Partial<Project> & { title: string }): Proj
     input.genre?.trim() || DEFAULT_PROJECT_GENRE,
     input.visualStyle?.trim() || getDefaultVideoStyle().promptValue,
     normalizeProjectRatio(input.ratio),
+    input.plannedEpisodes ?? null,
     timestamp,
     timestamp,
   )
@@ -266,12 +271,12 @@ export function getProject(id: string): Project | null {
   return row ? projectFromRow(row) : null
 }
 
-export function updateProject(id: string, fields: Partial<Pick<Project, 'title' | 'brief' | 'synopsis' | 'genre' | 'visualStyle' | 'ratio'>>): Project | null {
+export function updateProject(id: string, fields: Partial<Pick<Project, 'title' | 'brief' | 'synopsis' | 'genre' | 'visualStyle' | 'ratio' | 'plannedEpisodes'>>): Project | null {
   const db = getDb()
   const current = getProject(id)
   if (!current) return null
   db.prepare(`
-    UPDATE projects SET title = ?, brief = ?, synopsis = ?, genre = ?, visual_style = ?, ratio = ?, updated_at = ?
+    UPDATE projects SET title = ?, brief = ?, synopsis = ?, genre = ?, visual_style = ?, ratio = ?, planned_episodes = ?, updated_at = ?
     WHERE id = ?
   `).run(
     fields.title ?? current.title,
@@ -280,6 +285,7 @@ export function updateProject(id: string, fields: Partial<Pick<Project, 'title' 
     fields.genre ?? current.genre,
     fields.visualStyle ?? current.visualStyle,
     normalizeProjectRatio(fields.ratio ?? current.ratio),
+    fields.plannedEpisodes === undefined ? current.plannedEpisodes : fields.plannedEpisodes,
     now(),
     id,
   )
@@ -375,50 +381,231 @@ export function getProjectBundle(projectId: string): ProjectBundle | null {
   return { project, episodes, entities, shots, edits }
 }
 
-export function replaceGeneratedScript(projectId: string, script: GeneratedScript): ProjectBundle {
-  const db = getDb()
-  const transaction = db.transaction(() => {
-    const timestamp = now()
-    db.prepare(`
-      UPDATE projects SET title = ?, synopsis = ?, genre = ?, updated_at = ? WHERE id = ?
-    `).run(script.project.title, script.project.synopsis, script.project.genre, timestamp, projectId)
-    db.prepare('DELETE FROM episodes WHERE project_id = ?').run(projectId)
-    db.prepare('DELETE FROM entities WHERE project_id = ?').run(projectId)
+interface GeneratedEntityRecord {
+  kind: EntityKind
+  name: string
+  variant: string
+  description: string
+  episodes: number[]
+  category: string
+  metadata: Record<string, unknown>
+}
 
-    const insertEpisode = db.prepare(`
-      INSERT INTO episodes (id, project_id, episode_number, title, content, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
-    `)
-    script.episodes
-      .sort((a, b) => a.episodeNumber - b.episodeNumber)
-      .forEach(episode => insertEpisode.run(
-        randomUUID(), projectId, episode.episodeNumber, episode.title, episode.content, timestamp, timestamp,
-      ))
-
-    const insertEntity = db.prepare(`
-      INSERT INTO entities (
-        id, project_id, kind, name, variant, description, episodes_json, category, metadata_json,
-        selected_image_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-    `)
-    script.characters.forEach(character => insertEntity.run(
-      randomUUID(), projectId, 'character', character.name, character.variant || '默认造型',
-      character.description, JSON.stringify(character.episodes), '',
-      JSON.stringify({
+function generatedEntityRecords(script: GeneratedScript): GeneratedEntityRecord[] {
+  return [
+    ...script.characters.map(character => ({
+      kind: 'character' as const,
+      name: character.name,
+      variant: character.variant || '默认造型',
+      description: character.description,
+      episodes: character.episodes,
+      category: '',
+      metadata: {
         role: character.role,
         gender: character.gender,
         introduction: character.introduction || '',
         voiceDescription: character.voiceDescription || '',
-      }), timestamp, timestamp,
+      },
+    })),
+    ...script.scenes.map(scene => ({
+      kind: 'scene' as const,
+      name: scene.name,
+      variant: '',
+      description: scene.description,
+      episodes: scene.episodes,
+      category: '',
+      metadata: {},
+    })),
+    ...script.props.map(prop => ({
+      kind: 'prop' as const,
+      name: prop.name,
+      variant: '',
+      description: prop.description,
+      episodes: prop.episodes,
+      category: prop.category,
+      metadata: {},
+    })),
+  ]
+}
+
+function generatedEntityKey(entity: Pick<GeneratedEntityRecord, 'kind' | 'name' | 'variant'>): string {
+  return `${entity.kind}\u0000${entity.name.trim()}\u0000${entity.variant.trim()}`
+}
+
+function mergeGeneratedEntities(
+  db: Database.Database,
+  projectId: string,
+  script: GeneratedScript,
+  timestamp: string,
+  replaceEpisodeRange?: { start: number; end: number },
+): void {
+  const existingRows = db.prepare('SELECT * FROM entities WHERE project_id = ?').all(projectId) as SqlRow[]
+  const updateEpisodes = db.prepare('UPDATE entities SET episodes_json = ?, updated_at = ? WHERE id = ?')
+
+  if (replaceEpisodeRange) {
+    existingRows.forEach(row => {
+      const remaining = parseJson<number[]>(row.episodes_json, [])
+        .filter(episode => episode < replaceEpisodeRange.start || episode > replaceEpisodeRange.end)
+      row.episodes_json = JSON.stringify(remaining)
+      updateEpisodes.run(row.episodes_json, timestamp, row.id)
+    })
+  }
+
+  const existingByKey = new Map(existingRows.map(row => [generatedEntityKey({
+    kind: row.kind as EntityKind,
+    name: String(row.name),
+    variant: String(row.variant ?? ''),
+  }), row]))
+  const insertEntity = db.prepare(`
+    INSERT INTO entities (
+      id, project_id, kind, name, variant, description, episodes_json, category, metadata_json,
+      selected_image_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+  `)
+  const updateEntity = db.prepare(`
+    UPDATE entities
+    SET description = ?, episodes_json = ?, category = ?, metadata_json = ?, updated_at = ?
+    WHERE id = ?
+  `)
+
+  generatedEntityRecords(script).forEach(entity => {
+    const key = generatedEntityKey(entity)
+    const existing = existingByKey.get(key)
+    const generatedEpisodes = entity.episodes.filter(episode => Number.isInteger(episode) && episode > 0)
+    if (existing) {
+      const episodes = [...new Set([
+        ...parseJson<number[]>(existing.episodes_json, []),
+        ...generatedEpisodes,
+      ])].sort((a, b) => a - b)
+      existing.episodes_json = JSON.stringify(episodes)
+      updateEntity.run(
+        entity.description,
+        existing.episodes_json,
+        entity.category,
+        JSON.stringify(entity.metadata),
+        timestamp,
+        existing.id,
+      )
+      return
+    }
+
+    const id = randomUUID()
+    const episodesJson = JSON.stringify([...new Set(generatedEpisodes)].sort((a, b) => a - b))
+    insertEntity.run(
+      id, projectId, entity.kind, entity.name, entity.variant, entity.description,
+      episodesJson, entity.category, JSON.stringify(entity.metadata), timestamp, timestamp,
+    )
+    existingByKey.set(key, {
+      id,
+      kind: entity.kind,
+      name: entity.name,
+      variant: entity.variant,
+      episodes_json: episodesJson,
+    })
+  })
+}
+
+function insertGeneratedEpisodes(
+  db: Database.Database,
+  projectId: string,
+  episodes: GeneratedScript['episodes'],
+  timestamp: string,
+): void {
+  const insertEpisode = db.prepare(`
+    INSERT INTO episodes (id, project_id, episode_number, title, content, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
+  `)
+  episodes
+    .sort((a, b) => a.episodeNumber - b.episodeNumber)
+    .forEach(episode => insertEpisode.run(
+      randomUUID(), projectId, episode.episodeNumber, episode.title, episode.content, timestamp, timestamp,
     ))
-    script.scenes.forEach(scene => insertEntity.run(
-      randomUUID(), projectId, 'scene', scene.name, '', scene.description,
-      JSON.stringify(scene.episodes), '', '{}', timestamp, timestamp,
-    ))
-    script.props.forEach(prop => insertEntity.run(
-      randomUUID(), projectId, 'prop', prop.name, '', prop.description,
-      JSON.stringify(prop.episodes), prop.category, '{}', timestamp, timestamp,
-    ))
+}
+
+export function replaceGeneratedScript(
+  projectId: string,
+  script: GeneratedScript,
+  plannedEpisodes: number | null,
+): ProjectBundle {
+  const db = getDb()
+  const transaction = db.transaction(() => {
+    const timestamp = now()
+    db.prepare(`
+      UPDATE projects SET title = ?, synopsis = ?, genre = ?, planned_episodes = ?, updated_at = ? WHERE id = ?
+    `).run(script.project.title, script.project.synopsis, script.project.genre, plannedEpisodes, timestamp, projectId)
+    db.prepare('DELETE FROM episodes WHERE project_id = ?').run(projectId)
+    db.prepare('DELETE FROM entities WHERE project_id = ?').run(projectId)
+    insertGeneratedEpisodes(db, projectId, script.episodes, timestamp)
+    mergeGeneratedEntities(db, projectId, script, timestamp)
+  })
+  transaction()
+  return getProjectBundle(projectId)!
+}
+
+export function appendGeneratedScript(
+  projectId: string,
+  script: GeneratedScript,
+  options: { plannedEpisodes: number | null; brief?: string },
+): ProjectBundle {
+  const db = getDb()
+  const transaction = db.transaction(() => {
+    const existingNumbers = new Set((db.prepare(
+      'SELECT episode_number FROM episodes WHERE project_id = ?',
+    ).all(projectId) as SqlRow[]).map(row => Number(row.episode_number)))
+    const conflict = script.episodes.find(episode => existingNumbers.has(episode.episodeNumber))
+    if (conflict) throw new Error(`第 ${conflict.episodeNumber} 集已存在，无法续写覆盖`)
+
+    const timestamp = now()
+    if (options.brief !== undefined) {
+      db.prepare(`
+        UPDATE projects SET brief = ?, synopsis = ?, genre = ?, planned_episodes = ?, updated_at = ? WHERE id = ?
+      `).run(options.brief, script.project.synopsis, script.project.genre, options.plannedEpisodes, timestamp, projectId)
+    } else {
+      db.prepare(`
+        UPDATE projects SET synopsis = ?, genre = ?, planned_episodes = ?, updated_at = ? WHERE id = ?
+      `).run(script.project.synopsis, script.project.genre, options.plannedEpisodes, timestamp, projectId)
+    }
+    insertGeneratedEpisodes(db, projectId, script.episodes, timestamp)
+    mergeGeneratedEntities(db, projectId, script, timestamp)
+  })
+  transaction()
+  return getProjectBundle(projectId)!
+}
+
+export function rewriteGeneratedScript(
+  projectId: string,
+  startEpisode: number,
+  script: GeneratedScript,
+): ProjectBundle {
+  const db = getDb()
+  const transaction = db.transaction(() => {
+    const endEpisode = startEpisode + script.episodes.length - 1
+    const targets = db.prepare(`
+      SELECT id, episode_number FROM episodes
+      WHERE project_id = ? AND episode_number BETWEEN ? AND ?
+      ORDER BY episode_number
+    `).all(projectId, startEpisode, endEpisode) as SqlRow[]
+    if (targets.length !== script.episodes.length) throw new Error('重写范围包含不存在的分集')
+
+    const targetByNumber = new Map(targets.map(target => [Number(target.episode_number), String(target.id)]))
+    const timestamp = now()
+    const updateEpisode = db.prepare(`
+      UPDATE episodes SET title = ?, content = ?, status = 'draft', updated_at = ? WHERE id = ?
+    `)
+    script.episodes.forEach(episode => {
+      const id = targetByNumber.get(episode.episodeNumber)
+      if (!id) throw new Error(`重写结果缺少第 ${episode.episodeNumber} 集`)
+      updateEpisode.run(episode.title, episode.content, timestamp, id)
+    })
+
+    const targetIds = [...targetByNumber.values()]
+    const placeholders = targetIds.map(() => '?').join(', ')
+    db.prepare(`DELETE FROM shots WHERE episode_id IN (${placeholders})`).run(...targetIds)
+    db.prepare(`DELETE FROM edits WHERE episode_id IN (${placeholders})`).run(...targetIds)
+    db.prepare(`
+      UPDATE projects SET synopsis = ?, genre = ?, updated_at = ? WHERE id = ?
+    `).run(script.project.synopsis, script.project.genre, timestamp, projectId)
+    mergeGeneratedEntities(db, projectId, script, timestamp, { start: startEpisode, end: endEpisode })
   })
   transaction()
   return getProjectBundle(projectId)!
