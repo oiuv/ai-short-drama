@@ -22,9 +22,10 @@ const CATEGORIES: Array<{ value: StyleCategory; label: string }> = [
 interface VideoStylePickerProps {
   value: string
   onChange: (value: string) => void
+  disabled?: boolean
 }
 
-export function VideoStylePicker({ value, onChange }: VideoStylePickerProps) {
+export function VideoStylePicker({ value, onChange, disabled = false }: VideoStylePickerProps) {
   const selectedStyle = getStyleByPromptValue(value)
   const [open, setOpen] = useState(false)
   const [category, setCategory] = useState<StyleCategory>('all')
@@ -52,8 +53,9 @@ export function VideoStylePicker({ value, onChange }: VideoStylePickerProps) {
       <button
         type="button"
         aria-haspopup="dialog"
+        disabled={disabled}
         onClick={() => setOpen(true)}
-        className="flex w-full items-center gap-3 overflow-hidden rounded-2xl border border-[var(--line)] bg-white p-3 text-left transition hover:border-[#aeb8c6] hover:bg-[#fbfcfd]"
+        className="flex w-full items-center gap-3 overflow-hidden rounded-2xl border border-[var(--line)] bg-white p-3 text-left transition hover:border-[#aeb8c6] hover:bg-[#fbfcfd] disabled:cursor-not-allowed disabled:opacity-55"
       >
         {selectedStyle ? (
           <span className="relative h-14 w-20 shrink-0 overflow-hidden rounded-lg bg-[#dfe4ea]">

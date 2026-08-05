@@ -7,9 +7,10 @@ import { PROJECT_GENRES } from '@/config/project-options'
 interface GenrePickerProps {
   value: string
   onChange: (value: string) => void
+  disabled?: boolean
 }
 
-export function GenrePicker({ value, onChange }: GenrePickerProps) {
+export function GenrePicker({ value, onChange, disabled = false }: GenrePickerProps) {
   const isPreset = useMemo(
     () => PROJECT_GENRES.some(option => option === value),
     [value],
@@ -17,15 +18,16 @@ export function GenrePicker({ value, onChange }: GenrePickerProps) {
 
   return (
     <div>
-      <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="题材">
+      <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="题材" aria-disabled={disabled}>
         {PROJECT_GENRES.map(option => (
           <button
             key={option}
             type="button"
             role="radio"
             aria-checked={value === option}
+            disabled={disabled}
             onClick={() => onChange(option)}
-            className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+            className={`rounded-full border px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-55 ${
               value === option
                 ? 'border-[var(--navy)] bg-[var(--navy)] text-white shadow-sm'
                 : 'border-[var(--line)] bg-white text-[var(--muted)] hover:border-[#aeb8c6] hover:text-[var(--ink)]'
@@ -38,10 +40,11 @@ export function GenrePicker({ value, onChange }: GenrePickerProps) {
           type="button"
           role="radio"
           aria-checked={!isPreset}
+          disabled={disabled}
           onClick={() => {
             if (isPreset) onChange('')
           }}
-          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-55 ${
             !isPreset
               ? 'border-[var(--projector)] bg-[var(--projector)]/10 text-[var(--ink)]'
               : 'border-dashed border-[var(--line)] bg-white text-[var(--muted)] hover:border-[var(--projector)] hover:text-[var(--ink)]'
@@ -59,6 +62,7 @@ export function GenrePicker({ value, onChange }: GenrePickerProps) {
           placeholder="输入自定义题材，例如：民国谍战"
           maxLength={80}
           autoFocus
+          disabled={disabled}
         />
       )}
     </div>

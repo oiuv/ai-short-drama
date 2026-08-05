@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { resolveVideoStylePrompt } from '@/config/video-styles'
-import { DEEPSEEK_DEFAULT_MODEL } from '../model-config'
+import { DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MAX_OUTPUT_TOKENS } from '../model-config'
 import type { GeneratedScript, GeneratedStoryboard } from '../types'
 import { loadSkillPrompt } from '../skills'
 
@@ -59,7 +59,7 @@ const generatedStoryboardSchema = z.object({
 })
 
 const optimizedScriptBriefSchema = z.object({
-  brief: z.string().min(1).max(50_000),
+  brief: z.string().min(1).max(100_000),
   genreDetected: z.string().default(''),
   tips: z.array(z.string()).max(5).default([]),
 })
@@ -102,7 +102,7 @@ async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 98_304,
+        max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
         stream: false,
       }),
       signal: controller.signal,

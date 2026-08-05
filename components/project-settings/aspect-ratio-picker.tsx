@@ -5,13 +5,14 @@ import { PROJECT_RATIOS, normalizeProjectRatio, type ProjectRatio } from '@/conf
 interface AspectRatioPickerProps {
   value: string
   onChange: (value: ProjectRatio) => void
+  disabled?: boolean
 }
 
-export function AspectRatioPicker({ value, onChange }: AspectRatioPickerProps) {
+export function AspectRatioPicker({ value, onChange, disabled = false }: AspectRatioPickerProps) {
   const normalized = normalizeProjectRatio(value)
 
   return (
-    <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="画面比例">
+    <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="画面比例" aria-disabled={disabled}>
       {PROJECT_RATIOS.map(option => {
         const selected = normalized === option.value
         const vertical = option.value === '9:16'
@@ -21,8 +22,9 @@ export function AspectRatioPicker({ value, onChange }: AspectRatioPickerProps) {
             type="button"
             role="radio"
             aria-checked={selected}
+            disabled={disabled}
             onClick={() => onChange(option.value)}
-            className={`flex min-h-20 items-center gap-3 rounded-xl border px-3 text-left transition ${
+            className={`flex min-h-20 items-center gap-3 rounded-xl border px-3 text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
               selected
                 ? 'border-[var(--projector)] bg-[var(--projector)]/10 shadow-[0_0_0_2px_rgba(86,199,193,.13)]'
                 : 'border-[var(--line)] bg-white hover:border-[#aeb8c6]'

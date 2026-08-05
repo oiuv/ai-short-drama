@@ -203,7 +203,7 @@ npm run dev
 ```dotenv
 DEEPSEEK_API_KEY=your_deepseek_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_MODEL=deepseek-v4-flash
 
 VOLCENGINE_API_KEY=your_volcengine_key
 SEEDREAM_MODEL=doubao-seedream-5-0-260128
@@ -300,7 +300,7 @@ Skill frontmatter 只使用标准字段 `name` 和 `description`；模型、Toke
 
 | 用途 | 默认模型 | 可配置项 |
 | --- | --- | --- |
-| 需求优化、剧本、素材档案、分镜拆解 | `deepseek-v4-pro` | `DEEPSEEK_MODEL` |
+| 需求优化、剧本、素材档案、分镜拆解 | `deepseek-v4-flash` | `DEEPSEEK_MODEL` |
 | 角色、场景、道具图片 | `doubao-seedream-5-0-260128` | `SEEDREAM_MODEL` |
 | 分镜视频 | `doubao-seedance-2-0-260128` | `SEEDANCE_MODEL`，界面也可选择 Fast / Mini |
 

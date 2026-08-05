@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ArrowLeft, Clapperboard, Loader2, Plus, Sparkles } from 'lucide-react'
+import { ArrowLeft, Clapperboard, Loader2, Plus, RotateCcw, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { DEFAULT_PROJECT_GENRE } from '@/config/project-options'
 import { getDefaultVideoStyle } from '@/config/video-styles'
@@ -39,6 +39,7 @@ export function CreateProjectPage() {
   const router = useRouter()
   const [creating, setCreating] = useState(false)
   const [optimizingBrief, setOptimizingBrief] = useState(false)
+  const [briefHistory, setBriefHistory] = useState<string[]>([])
   const [form, setForm] = useState({
     title: '',
     brief: '',
@@ -46,29 +47,48 @@ export function CreateProjectPage() {
     visualStyle: getDefaultVideoStyle().promptValue,
     ratio: '9:16',
   })
+  const formLocked = optimizingBrief || creating
 
   const optimizeBrief = async () => {
     if (!form.brief.trim()) return toast.error('先写下一句话故事想法，再让 AI 帮你扩写')
+    if (!form.genre.trim()) return toast.error('请选择题材或填写自定义题材')
+    if (!form.visualStyle.trim()) return toast.error('请选择视觉风格')
+    const requestInput = { ...form }
     setOptimizingBrief(true)
     try {
       const result = await requestJson<{ brief: string; genreDetected: string; tips: string[] }>('/api/script-brief', {
         method: 'POST',
         body: JSON.stringify({
-          brief: form.brief,
-          title: form.title,
-          genre: form.genre,
-          visualStyle: form.visualStyle,
-          ratio: form.ratio,
+          brief: requestInput.brief,
+          title: requestInput.title,
+          genre: requestInput.genre,
+          visualStyle: requestInput.visualStyle,
+          ratio: requestInput.ratio,
         }),
       })
-      if (!result.brief.trim()) throw new Error('AI 未返回有效的创作需求')
-      setForm(current => ({ ...current, brief: result.brief.trim() }))
-      toast.success('创作需求已优化，可继续修改')
+      const optimizedBrief = result.brief.trim()
+      if (!optimizedBrief) throw new Error('AI 未返回有效的创作需求')
+      if (optimizedBrief !== requestInput.brief.trim()) {
+        setBriefHistory(current => [...current, requestInput.brief].slice(-10))
+        setForm(current => ({ ...current, brief: optimizedBrief }))
+        toast.success('创作需求已优化，可继续修改或恢复上个版本')
+      } else {
+        toast.info('当前创作需求已经足够完整')
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '创作需求优化失败')
     } finally {
       setOptimizingBrief(false)
     }
+  }
+
+  const restoreBrief = () => {
+    if (formLocked) return
+    const previousBrief = briefHistory.at(-1)
+    if (previousBrief === undefined) return
+    setForm(current => ({ ...current, brief: previousBrief }))
+    setBriefHistory(current => current.slice(0, -1))
+    toast.success('已恢复上个创作需求版本')
   }
 
   const create = async () => {
@@ -121,11 +141,11 @@ export function CreateProjectPage() {
             <div className="mt-5 space-y-5">
               <label>
                 <span className="label">片名</span>
-                <input className="field" value={form.title} onChange={event => setForm({ ...form, title: event.target.value })} placeholder="例如：雨夜最后一班车" autoFocus />
+                <input className="field" value={form.title} onChange={event => setForm({ ...form, title: event.target.value })} placeholder="例如：雨夜最后一班车" autoFocus disabled={formLocked} />
               </label>
               <div>
                 <span className="label">题材</span>
-                <GenrePicker value={form.genre} onChange={genre => setForm({ ...form, genre })} />
+                <GenrePicker value={form.genre} onChange={genre => setForm({ ...form, genre })} disabled={formLocked} />
               </div>
             </div>
           </section>
@@ -135,14 +155,22 @@ export function CreateProjectPage() {
               <div>
                 <div className="label">Story brief</div>
                 <label htmlFor="project-brief" className="display-type block text-2xl font-semibold">创作想法 / 原始故事</label>
-                <p className="mt-1 text-sm leading-6 text-[var(--muted)]">写一句话、详细大纲或粘贴已有素材，AI 优化后会直接回填到这里。</p>
+                <p className="mt-1 text-sm leading-6 text-[var(--muted)]">写一句话、详细大纲或粘贴已有素材。AI 优化会保存当前版本，随时可以恢复。</p>
               </div>
-              <button type="button" className="btn-secondary shrink-0" disabled={!form.brief.trim() || optimizingBrief || creating} onClick={() => void optimizeBrief()}>
-                {optimizingBrief ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                {optimizingBrief ? 'AI 优化中…' : 'AI 优化需求'}
-              </button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {briefHistory.length > 0 && (
+                  <button type="button" className="btn-secondary shrink-0" disabled={formLocked} onClick={restoreBrief}>
+                    <RotateCcw className="h-4 w-4" />
+                    恢复上个版本
+                  </button>
+                )}
+                <button type="button" className="btn-secondary shrink-0" disabled={!form.brief.trim() || !form.genre.trim() || !form.visualStyle.trim() || formLocked} onClick={() => void optimizeBrief()}>
+                  {optimizingBrief ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {optimizingBrief ? 'AI 优化中…' : 'AI 优化需求'}
+                </button>
+              </div>
             </div>
-            <textarea id="project-brief" className="field mt-5 min-h-[620px] resize-y leading-7" value={form.brief} onChange={event => setForm({ ...form, brief: event.target.value })} placeholder={BRIEF_PLACEHOLDER} maxLength={100_000} disabled={optimizingBrief} />
+            <textarea id="project-brief" className="field mt-5 min-h-[620px] resize-y leading-7" value={form.brief} onChange={event => setForm({ ...form, brief: event.target.value })} placeholder={BRIEF_PLACEHOLDER} maxLength={100_000} disabled={formLocked} />
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--muted)]">
               <span>AI 会保留已明确的人物、情节、结局和禁忌，只补全缺失的创作要素。</span>
               <span className="timecode shrink-0">{form.brief.length} / 100000</span>
@@ -153,7 +181,7 @@ export function CreateProjectPage() {
             <div className="label">Visual language</div>
             <h2 className="display-type text-2xl font-semibold">视觉风格</h2>
             <p className="mb-5 mt-1 text-sm leading-6 text-[var(--muted)]">统一角色、场景、道具和所有分镜的材质、色彩、光线与构图语言。</p>
-            <VideoStylePicker value={form.visualStyle} onChange={visualStyle => setForm({ ...form, visualStyle })} />
+            <VideoStylePicker value={form.visualStyle} onChange={visualStyle => setForm({ ...form, visualStyle })} disabled={formLocked} />
           </section>
         </div>
 
@@ -162,7 +190,7 @@ export function CreateProjectPage() {
             <div className="label">Frame</div>
             <h2 className="display-type text-xl font-semibold">画面比例</h2>
             <div className="mt-4">
-              <AspectRatioPicker value={form.ratio} onChange={ratio => setForm({ ...form, ratio })} />
+              <AspectRatioPicker value={form.ratio} onChange={ratio => setForm({ ...form, ratio })} disabled={formLocked} />
             </div>
             <div className="panel-muted mt-4 p-4">
               <div className="timecode text-[10px] text-[var(--muted)]">PRODUCTION LOCK</div>

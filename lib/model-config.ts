@@ -1,10 +1,11 @@
-export const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-pro'
+export const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-flash'
+export const DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000
 export const SEEDREAM_5_LITE_MODEL = 'doubao-seedream-5-0-260128'
 
 export const SEEDANCE_MODELS = [
   {
     id: 'doubao-seedance-2-0-260128',
-    name: 'Seedance 2.0',
+    name: 'Seedance 2.0 Pro',
     resolutions: ['480p', '720p', '1080p', '4k'],
     minDuration: 4,
     maxDuration: 15,
