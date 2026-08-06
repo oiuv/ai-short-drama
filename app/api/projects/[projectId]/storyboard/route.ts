@@ -25,6 +25,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     if (episode.status !== 'confirmed') return fail('请先定稿本集剧本，再进入分镜制作', 409)
     if (body.action === 'add') return ok(createShot(projectId, episode.id), { status: 201 })
     if (!episode.content.trim()) return fail('本集剧本内容为空', 400)
+    if (bundle.shots.some(shot => shot.episodeId === episode.id && shot.status === 'generating')) {
+      return fail('本集仍有视频正在生成，完成后才能重新拆分分镜', 409)
+    }
     const episodeEntities = bundle.entities.filter(entity => (
       entity.episodes.length === 0 || entity.episodes.includes(episode.episodeNumber)
     ))
@@ -59,6 +62,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     }))
     return ok(replaceStoryboard(projectId, episode.id, shots))
   } catch (error) {
-    return fail(error, error instanceof z.ZodError ? 400 : 500)
+    const status = error instanceof z.ZodError
+      ? 400
+      : error instanceof Error && error.message.includes('仍有视频正在生成')
+        ? 409
+        : 500
+    return fail(error, status)
   }
 }

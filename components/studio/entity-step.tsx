@@ -67,7 +67,7 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
     const entityLabel = `${entity.name}${entity.variant ? ` / ${entity.variant}` : ''}`
     if (!await confirmToast({
       title: `删除“${entityLabel}”？`,
-      description: '该素材档案及其所有图片版本记录都会被删除，此操作不可撤销。',
+      description: '该素材档案及其图片版本将从工作区隐藏；数据库记录与本地图片文件保留。',
       confirmLabel: '删除素材',
     })) return
     try {
@@ -146,7 +146,7 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
   const deleteVersion = async (entity: Entity, imageId: string) => {
     if (!await confirmToast({
       title: '删除这个图片版本？',
-      description: '该版本记录和本地图片文件都会被删除；若它是当前版本，将自动切换到最近版本。',
+      description: '该版本将从工作区隐藏，本地图片文件保留；若它是当前版本，将自动切换到最近版本。',
       confirmLabel: '删除版本',
     })) return
     try {

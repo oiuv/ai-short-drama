@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { addEntityImage, deleteEntityImage, getEntity, getProject, selectEntityImage } from '@/lib/db'
 import { buildEntityImagePrompt } from '@/lib/prompts'
 import { generateSeedreamImage } from '@/lib/providers/seedream'
-import { deleteMediaFile, saveDataUrl } from '@/lib/local-media'
+import { saveDataUrl } from '@/lib/local-media'
 import { fail, ok } from '@/lib/api'
 
 export const maxDuration = 600
@@ -23,7 +23,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ ent
     if (body.action === 'delete') {
       const deleted = deleteEntityImage(entity.id, body.imageId)
       if (!deleted) return fail('图片版本不存在', 404)
-      await deleteMediaFile(deleted.path)
       return ok(deleted.entity)
     }
     if (body.action === 'select') {

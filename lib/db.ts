@@ -40,6 +40,75 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+function placeholders(ids: string[]): string {
+  return ids.map(() => '?').join(', ')
+}
+
+function archiveEditEpisodeIds(db: Database.Database, episodeIds: string[], timestamp: string): void {
+  if (!episodeIds.length) return
+  const values = placeholders(episodeIds)
+  db.prepare(`
+    UPDATE edits SET deleted_at = ?, updated_at = ?
+    WHERE deleted_at IS NULL AND episode_id IN (${values})
+  `).run(timestamp, timestamp, ...episodeIds)
+}
+
+function archiveShotIds(db: Database.Database, shotIds: string[], timestamp: string): void {
+  if (!shotIds.length) return
+  const values = placeholders(shotIds)
+  const generating = db.prepare(`
+    SELECT id FROM shots
+    WHERE deleted_at IS NULL AND status = 'generating' AND id IN (${values})
+    LIMIT 1
+  `).get(...shotIds)
+  if (generating) throw new Error('仍有视频正在生成，完成后才能删除或替换相关内容')
+  const episodeIds = (db.prepare(`
+    SELECT DISTINCT episode_id FROM shots
+    WHERE deleted_at IS NULL AND id IN (${values})
+  `).all(...shotIds) as SqlRow[]).map(row => String(row.episode_id))
+  archiveEditEpisodeIds(db, episodeIds, timestamp)
+  db.prepare(`
+    UPDATE shot_videos SET deleted_at = ?
+    WHERE deleted_at IS NULL AND shot_id IN (${values})
+  `).run(timestamp, ...shotIds)
+  db.prepare(`
+    UPDATE shots
+    SET deleted_at = ?, deleted_shot_order = shot_order, shot_order = -rowid,
+      updated_at = ?
+    WHERE deleted_at IS NULL AND id IN (${values})
+  `).run(timestamp, timestamp, ...shotIds)
+}
+
+function archiveEpisodeIds(db: Database.Database, episodeIds: string[], timestamp: string): void {
+  if (!episodeIds.length) return
+  const values = placeholders(episodeIds)
+  const shotIds = (db.prepare(`
+    SELECT id FROM shots WHERE deleted_at IS NULL AND episode_id IN (${values})
+  `).all(...episodeIds) as SqlRow[]).map(row => String(row.id))
+  archiveShotIds(db, shotIds, timestamp)
+  archiveEditEpisodeIds(db, episodeIds, timestamp)
+  db.prepare(`
+    UPDATE episodes
+    SET deleted_at = ?, deleted_episode_number = episode_number,
+      episode_number = -rowid, updated_at = ?
+    WHERE deleted_at IS NULL AND id IN (${values})
+  `).run(timestamp, timestamp, ...episodeIds)
+}
+
+function archiveEntityIds(db: Database.Database, entityIds: string[], timestamp: string): void {
+  if (!entityIds.length) return
+  const values = placeholders(entityIds)
+  db.prepare(`
+    UPDATE entity_images SET deleted_at = ?
+    WHERE deleted_at IS NULL AND entity_id IN (${values})
+  `).run(timestamp, ...entityIds)
+  db.prepare(`
+    UPDATE entities
+    SET deleted_at = ?, updated_at = ?
+    WHERE deleted_at IS NULL AND id IN (${values})
+  `).run(timestamp, timestamp, ...entityIds)
+}
+
 function initialize(db: Database.Database): void {
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
@@ -54,7 +123,8 @@ function initialize(db: Database.Database): void {
       ratio TEXT NOT NULL DEFAULT '9:16',
       planned_episodes INTEGER,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS episodes (
@@ -66,6 +136,8 @@ function initialize(db: Database.Database): void {
       status TEXT NOT NULL DEFAULT 'draft',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      deleted_episode_number INTEGER,
       UNIQUE(project_id, episode_number)
     );
 
@@ -81,7 +153,8 @@ function initialize(db: Database.Database): void {
       metadata_json TEXT NOT NULL DEFAULT '{}',
       selected_image_id TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS entity_images (
@@ -89,7 +162,8 @@ function initialize(db: Database.Database): void {
       entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
       path TEXT NOT NULL,
       prompt TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS shots (
@@ -106,6 +180,8 @@ function initialize(db: Database.Database): void {
       selected_video_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      deleted_shot_order INTEGER,
       UNIQUE(episode_id, shot_order)
     );
 
@@ -120,7 +196,8 @@ function initialize(db: Database.Database): void {
       prompt TEXT NOT NULL DEFAULT '',
       rating INTEGER CHECK(rating IS NULL OR (rating >= 1 AND rating <= 5)),
       note TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS edits (
@@ -129,7 +206,8 @@ function initialize(db: Database.Database): void {
       episode_id TEXT NOT NULL UNIQUE REFERENCES episodes(id) ON DELETE CASCADE,
       clips_json TEXT NOT NULL DEFAULT '[]',
       output_path TEXT,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_episodes_project ON episodes(project_id, episode_number);
@@ -212,16 +290,16 @@ function videoFromRow(row: SqlRow): VideoVersion {
 
 export function listProjects(): ProjectListItem[] {
   const db = getDb()
-  const rows = db.prepare('SELECT * FROM projects ORDER BY updated_at DESC').all() as SqlRow[]
+  const rows = db.prepare('SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC').all() as SqlRow[]
   return rows.map(row => {
     const project = projectFromRow(row)
     const episodeCounts = db.prepare(`
       SELECT COUNT(*) total, SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) confirmed
-      FROM episodes WHERE project_id = ?
+      FROM episodes WHERE project_id = ? AND deleted_at IS NULL
     `).get(project.id) as SqlRow
     const entityCounts = db.prepare(`
       SELECT kind, COUNT(*) total, SUM(CASE WHEN selected_image_id IS NOT NULL THEN 1 ELSE 0 END) with_image
-      FROM entities WHERE project_id = ? GROUP BY kind
+      FROM entities WHERE project_id = ? AND deleted_at IS NULL GROUP BY kind
     `).all(project.id) as SqlRow[]
     const byKind = new Map(entityCounts.map(item => [String(item.kind), item]))
     const shotCounts = db.prepare(`
@@ -229,7 +307,7 @@ export function listProjects(): ProjectListItem[] {
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) completed,
         SUM(CASE WHEN status = 'generating' THEN 1 ELSE 0 END) generating,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) failed
-      FROM shots WHERE project_id = ?
+      FROM shots WHERE project_id = ? AND deleted_at IS NULL
     `).get(project.id) as SqlRow
     const count = (kind: EntityKind, field: 'total' | 'with_image') => Number(byKind.get(kind)?.[field] ?? 0)
     return {
@@ -273,7 +351,7 @@ export function createProject(input: Partial<Project> & { title: string }): Proj
 }
 
 export function getProject(id: string): Project | null {
-  const row = getDb().prepare('SELECT * FROM projects WHERE id = ?').get(id) as SqlRow | undefined
+  const row = getDb().prepare('SELECT * FROM projects WHERE id = ? AND deleted_at IS NULL').get(id) as SqlRow | undefined
   return row ? projectFromRow(row) : null
 }
 
@@ -299,7 +377,25 @@ export function updateProject(id: string, fields: Partial<Pick<Project, 'title' 
 }
 
 export function deleteProject(id: string): boolean {
-  return getDb().prepare('DELETE FROM projects WHERE id = ?').run(id).changes > 0
+  const db = getDb()
+  const exists = db.prepare('SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL').get(id)
+  if (!exists) return false
+  const archive = db.transaction(() => {
+    const timestamp = now()
+    const episodeIds = (db.prepare(`
+      SELECT id FROM episodes WHERE project_id = ? AND deleted_at IS NULL
+    `).all(id) as SqlRow[]).map(row => String(row.id))
+    const entityIds = (db.prepare(`
+      SELECT id FROM entities WHERE project_id = ? AND deleted_at IS NULL
+    `).all(id) as SqlRow[]).map(row => String(row.id))
+    archiveEpisodeIds(db, episodeIds, timestamp)
+    archiveEntityIds(db, entityIds, timestamp)
+    db.prepare(`
+      UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL
+    `).run(timestamp, timestamp, id)
+  })
+  archive()
+  return true
 }
 
 export function getProjectBundle(projectId: string): ProjectBundle | null {
@@ -307,19 +403,26 @@ export function getProjectBundle(projectId: string): ProjectBundle | null {
   const project = getProject(projectId)
   if (!project) return null
 
-  const episodes = (db.prepare('SELECT * FROM episodes WHERE project_id = ? ORDER BY episode_number').all(projectId) as SqlRow[])
+  const episodes = (db.prepare(`
+    SELECT * FROM episodes WHERE project_id = ? AND deleted_at IS NULL ORDER BY episode_number
+  `).all(projectId) as SqlRow[])
     .map(episodeFromRow)
 
   const imageRows = db.prepare(`
     SELECT entity_images.* FROM entity_images
     JOIN entities ON entities.id = entity_images.entity_id
-    WHERE entities.project_id = ? ORDER BY entity_images.created_at DESC
+    WHERE entities.project_id = ?
+      AND entities.deleted_at IS NULL
+      AND entity_images.deleted_at IS NULL
+    ORDER BY entity_images.created_at DESC
   `).all(projectId) as SqlRow[]
   const imagesByEntity = new Map<string, ImageVersion[]>()
   imageRows.map(imageFromRow).forEach(image => {
     imagesByEntity.set(image.entityId, [...(imagesByEntity.get(image.entityId) ?? []), image])
   })
-  const entities = (db.prepare('SELECT * FROM entities WHERE project_id = ? ORDER BY kind, created_at').all(projectId) as SqlRow[])
+  const entities = (db.prepare(`
+    SELECT * FROM entities WHERE project_id = ? AND deleted_at IS NULL ORDER BY kind, created_at
+  `).all(projectId) as SqlRow[])
     .map((row): Entity => {
       const images = imagesByEntity.get(String(row.id)) ?? []
       const selectedImageId = row.selected_image_id ? String(row.selected_image_id) : null
@@ -344,13 +447,18 @@ export function getProjectBundle(projectId: string): ProjectBundle | null {
   const videoRows = db.prepare(`
     SELECT shot_videos.* FROM shot_videos
     JOIN shots ON shots.id = shot_videos.shot_id
-    WHERE shots.project_id = ? ORDER BY shot_videos.created_at DESC
+    WHERE shots.project_id = ?
+      AND shots.deleted_at IS NULL
+      AND shot_videos.deleted_at IS NULL
+    ORDER BY shot_videos.created_at DESC
   `).all(projectId) as SqlRow[]
   const videosByShot = new Map<string, VideoVersion[]>()
   videoRows.map(videoFromRow).forEach(video => {
     videosByShot.set(video.shotId, [...(videosByShot.get(video.shotId) ?? []), video])
   })
-  const shots = (db.prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY episode_id, shot_order').all(projectId) as SqlRow[])
+  const shots = (db.prepare(`
+    SELECT * FROM shots WHERE project_id = ? AND deleted_at IS NULL ORDER BY episode_id, shot_order
+  `).all(projectId) as SqlRow[])
     .map((row): Shot => {
       const videos = videosByShot.get(String(row.id)) ?? []
       const selectedVideoId = row.selected_video_id ? String(row.selected_video_id) : null
@@ -373,7 +481,9 @@ export function getProjectBundle(projectId: string): ProjectBundle | null {
       }
     })
 
-  const edits = (db.prepare('SELECT * FROM edits WHERE project_id = ?').all(projectId) as SqlRow[])
+  const edits = (db.prepare(`
+    SELECT * FROM edits WHERE project_id = ? AND deleted_at IS NULL
+  `).all(projectId) as SqlRow[])
     .map((row): EditDraft => ({
       id: String(row.id),
       projectId: String(row.project_id),
@@ -445,7 +555,9 @@ function mergeGeneratedEntities(
   timestamp: string,
   replaceEpisodeRange?: { start: number; end: number },
 ): void {
-  const existingRows = db.prepare('SELECT * FROM entities WHERE project_id = ?').all(projectId) as SqlRow[]
+  const existingRows = db.prepare(`
+    SELECT * FROM entities WHERE project_id = ? AND deleted_at IS NULL
+  `).all(projectId) as SqlRow[]
   const updateEpisodes = db.prepare('UPDATE entities SET episodes_json = ?, updated_at = ? WHERE id = ?')
 
   if (replaceEpisodeRange) {
@@ -539,8 +651,14 @@ export function replaceGeneratedScript(
     db.prepare(`
       UPDATE projects SET title = ?, synopsis = ?, genre = ?, planned_episodes = ?, updated_at = ? WHERE id = ?
     `).run(script.project.title, script.project.synopsis, script.project.genre, plannedEpisodes, timestamp, projectId)
-    db.prepare('DELETE FROM episodes WHERE project_id = ?').run(projectId)
-    db.prepare('DELETE FROM entities WHERE project_id = ?').run(projectId)
+    const episodeIds = (db.prepare(`
+      SELECT id FROM episodes WHERE project_id = ? AND deleted_at IS NULL
+    `).all(projectId) as SqlRow[]).map(row => String(row.id))
+    const entityIds = (db.prepare(`
+      SELECT id FROM entities WHERE project_id = ? AND deleted_at IS NULL
+    `).all(projectId) as SqlRow[]).map(row => String(row.id))
+    archiveEpisodeIds(db, episodeIds, timestamp)
+    archiveEntityIds(db, entityIds, timestamp)
     insertGeneratedEpisodes(db, projectId, script.episodes, timestamp)
     mergeGeneratedEntities(db, projectId, script, timestamp)
   })
@@ -556,7 +674,7 @@ export function appendGeneratedScript(
   const db = getDb()
   const transaction = db.transaction(() => {
     const existingNumbers = new Set((db.prepare(
-      'SELECT episode_number FROM episodes WHERE project_id = ?',
+      'SELECT episode_number FROM episodes WHERE project_id = ? AND deleted_at IS NULL',
     ).all(projectId) as SqlRow[]).map(row => Number(row.episode_number)))
     const conflict = script.episodes.find(episode => existingNumbers.has(episode.episodeNumber))
     if (conflict) throw new Error(`第 ${conflict.episodeNumber} 集已存在，无法续写覆盖`)
@@ -588,7 +706,7 @@ export function rewriteGeneratedScript(
     const endEpisode = startEpisode + script.episodes.length - 1
     const targets = db.prepare(`
       SELECT id, episode_number FROM episodes
-      WHERE project_id = ? AND episode_number BETWEEN ? AND ?
+      WHERE project_id = ? AND deleted_at IS NULL AND episode_number BETWEEN ? AND ?
       ORDER BY episode_number
     `).all(projectId, startEpisode, endEpisode) as SqlRow[]
     if (targets.length !== script.episodes.length) throw new Error('重写范围包含不存在的分集')
@@ -605,9 +723,12 @@ export function rewriteGeneratedScript(
     })
 
     const targetIds = [...targetByNumber.values()]
-    const placeholders = targetIds.map(() => '?').join(', ')
-    db.prepare(`DELETE FROM shots WHERE episode_id IN (${placeholders})`).run(...targetIds)
-    db.prepare(`DELETE FROM edits WHERE episode_id IN (${placeholders})`).run(...targetIds)
+    const values = placeholders(targetIds)
+    const shotIds = (db.prepare(`
+      SELECT id FROM shots WHERE deleted_at IS NULL AND episode_id IN (${values})
+    `).all(...targetIds) as SqlRow[]).map(row => String(row.id))
+    archiveShotIds(db, shotIds, timestamp)
+    archiveEditEpisodeIds(db, targetIds, timestamp)
     db.prepare(`
       UPDATE projects SET synopsis = ?, genre = ?, updated_at = ? WHERE id = ?
     `).run(script.project.synopsis, script.project.genre, timestamp, projectId)
@@ -619,7 +740,9 @@ export function rewriteGeneratedScript(
 
 export function createEpisode(projectId: string): Episode {
   const db = getDb()
-  const maxRow = db.prepare('SELECT MAX(episode_number) max_number FROM episodes WHERE project_id = ?').get(projectId) as SqlRow
+  const maxRow = db.prepare(`
+    SELECT MAX(episode_number) max_number FROM episodes WHERE project_id = ? AND deleted_at IS NULL
+  `).get(projectId) as SqlRow
   const episodeNumber = Number(maxRow.max_number ?? 0) + 1
   const id = randomUUID()
   const timestamp = now()
@@ -631,7 +754,7 @@ export function createEpisode(projectId: string): Episode {
 }
 
 export function getEpisode(id: string): Episode | null {
-  const row = getDb().prepare('SELECT * FROM episodes WHERE id = ?').get(id) as SqlRow | undefined
+  const row = getDb().prepare('SELECT * FROM episodes WHERE id = ? AND deleted_at IS NULL').get(id) as SqlRow | undefined
   return row ? episodeFromRow(row) : null
 }
 
@@ -651,7 +774,11 @@ export function updateEpisode(id: string, fields: Partial<Pick<Episode, 'title' 
 }
 
 export function deleteEpisode(id: string): boolean {
-  return getDb().prepare('DELETE FROM episodes WHERE id = ?').run(id).changes > 0
+  const db = getDb()
+  const episode = db.prepare('SELECT id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(id)
+  if (!episode) return false
+  db.transaction(() => archiveEpisodeIds(db, [id], now()))()
+  return true
 }
 
 export function createEntity(projectId: string, input: {
@@ -680,7 +807,9 @@ export function createEntity(projectId: string, input: {
 }
 
 export function getEntity(id: string): Entity | null {
-  const row = getDb().prepare('SELECT project_id FROM entities WHERE id = ?').get(id) as SqlRow | undefined
+  const row = getDb().prepare(`
+    SELECT project_id FROM entities WHERE id = ? AND deleted_at IS NULL
+  `).get(id) as SqlRow | undefined
   if (!row) return null
   return getProjectBundle(String(row.project_id))?.entities.find(entity => entity.id === id) ?? null
 }
@@ -706,7 +835,11 @@ export function updateEntity(id: string, fields: Partial<Pick<Entity, 'name' | '
 }
 
 export function deleteEntity(id: string): boolean {
-  return getDb().prepare('DELETE FROM entities WHERE id = ?').run(id).changes > 0
+  const db = getDb()
+  const entity = db.prepare('SELECT id FROM entities WHERE id = ? AND deleted_at IS NULL').get(id)
+  if (!entity) return false
+  db.transaction(() => archiveEntityIds(db, [id], now()))()
+  return true
 }
 
 export function addEntityImage(entityId: string, imagePath: string, prompt: string): Entity {
@@ -725,7 +858,9 @@ export function addEntityImage(entityId: string, imagePath: string, prompt: stri
 
 export function selectEntityImage(entityId: string, imageId: string): Entity | null {
   const db = getDb()
-  const owns = db.prepare('SELECT id FROM entity_images WHERE id = ? AND entity_id = ?').get(imageId, entityId)
+  const owns = db.prepare(`
+    SELECT id FROM entity_images WHERE id = ? AND entity_id = ? AND deleted_at IS NULL
+  `).get(imageId, entityId)
   if (!owns) return null
   db.prepare('UPDATE entities SET selected_image_id = ?, updated_at = ? WHERE id = ?').run(imageId, now(), entityId)
   return getEntity(entityId)
@@ -736,10 +871,14 @@ export function confirmAllDraftEpisodes(projectId: string): ProjectBundle {
   const confirm = db.transaction(() => {
     const empty = db.prepare(`
       SELECT episode_number FROM episodes WHERE project_id = ? AND status = 'draft' AND TRIM(content) = ''
+        AND deleted_at IS NULL
       ORDER BY episode_number LIMIT 1
     `).get(projectId) as SqlRow | undefined
     if (empty) throw new Error(`第 ${Number(empty.episode_number)} 集内容为空，不能批量定稿`)
-    db.prepare(`UPDATE episodes SET status = 'confirmed', updated_at = ? WHERE project_id = ? AND status = 'draft'`)
+    db.prepare(`
+      UPDATE episodes SET status = 'confirmed', updated_at = ?
+      WHERE project_id = ? AND status = 'draft' AND deleted_at IS NULL
+    `)
       .run(now(), projectId)
   })
   confirm()
@@ -748,20 +887,27 @@ export function confirmAllDraftEpisodes(projectId: string): ProjectBundle {
 
 export function deleteEntityImage(entityId: string, imageId: string): { entity: Entity; path: string } | null {
   const db = getDb()
-  const image = db.prepare('SELECT path FROM entity_images WHERE id = ? AND entity_id = ?')
+  const image = db.prepare(`
+    SELECT path FROM entity_images WHERE id = ? AND entity_id = ? AND deleted_at IS NULL
+  `)
     .get(imageId, entityId) as SqlRow | undefined
   if (!image) return null
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM entity_images WHERE id = ?').run(imageId)
-    const entity = db.prepare('SELECT selected_image_id FROM entities WHERE id = ?').get(entityId) as SqlRow
+    const timestamp = now()
+    db.prepare('UPDATE entity_images SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(timestamp, imageId)
+    const entity = db.prepare(`
+      SELECT selected_image_id FROM entities WHERE id = ? AND deleted_at IS NULL
+    `).get(entityId) as SqlRow
     if (String(entity.selected_image_id ?? '') === imageId) {
       const replacement = db.prepare(`
-        SELECT id FROM entity_images WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1
+        SELECT id FROM entity_images
+        WHERE entity_id = ? AND deleted_at IS NULL
+        ORDER BY created_at DESC LIMIT 1
       `).get(entityId) as SqlRow | undefined
       db.prepare('UPDATE entities SET selected_image_id = ?, updated_at = ? WHERE id = ?')
-        .run(replacement ? String(replacement.id) : null, now(), entityId)
+        .run(replacement ? String(replacement.id) : null, timestamp, entityId)
     } else {
-      db.prepare('UPDATE entities SET updated_at = ? WHERE id = ?').run(now(), entityId)
+      db.prepare('UPDATE entities SET updated_at = ? WHERE id = ?').run(timestamp, entityId)
     }
   })
   transaction()
@@ -776,14 +922,23 @@ export function replaceStoryboard(projectId: string, episodeId: string, shots: A
 }>): Shot[] {
   const db = getDb()
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM shots WHERE episode_id = ?').run(episodeId)
+    const generating = db.prepare(`
+      SELECT id FROM shots
+      WHERE episode_id = ? AND deleted_at IS NULL AND status = 'generating'
+      LIMIT 1
+    `).get(episodeId)
+    if (generating) throw new Error('本集仍有视频正在生成，完成后才能重新拆分分镜')
+    const existingIds = (db.prepare(`
+      SELECT id FROM shots WHERE episode_id = ? AND deleted_at IS NULL
+    `).all(episodeId) as SqlRow[]).map(row => String(row.id))
+    const timestamp = now()
+    archiveShotIds(db, existingIds, timestamp)
     const insert = db.prepare(`
       INSERT INTO shots (
         id, project_id, episode_id, shot_order, prompt, duration, reference_entity_ids_json,
         status, provider_task_id, error, selected_video_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)
     `)
-    const timestamp = now()
     shots.forEach((shot, index) => insert.run(
       randomUUID(), projectId, episodeId, index + 1, shot.prompt, shot.duration,
       JSON.stringify(shot.referenceEntityIds), timestamp, timestamp,
@@ -795,7 +950,9 @@ export function replaceStoryboard(projectId: string, episodeId: string, shots: A
 
 export function createShot(projectId: string, episodeId: string): Shot {
   const db = getDb()
-  const maxRow = db.prepare('SELECT MAX(shot_order) max_order FROM shots WHERE episode_id = ?').get(episodeId) as SqlRow
+  const maxRow = db.prepare(`
+    SELECT MAX(shot_order) max_order FROM shots WHERE episode_id = ? AND deleted_at IS NULL
+  `).get(episodeId) as SqlRow
   const order = Number(maxRow.max_order ?? 0) + 1
   const id = randomUUID()
   const timestamp = now()
@@ -809,7 +966,9 @@ export function createShot(projectId: string, episodeId: string): Shot {
 }
 
 export function getShot(id: string): Shot | null {
-  const row = getDb().prepare('SELECT project_id FROM shots WHERE id = ?').get(id) as SqlRow | undefined
+  const row = getDb().prepare(`
+    SELECT project_id FROM shots WHERE id = ? AND deleted_at IS NULL
+  `).get(id) as SqlRow | undefined
   if (!row) return null
   return getProjectBundle(String(row.project_id))?.shots.find(shot => shot.id === id) ?? null
 }
@@ -819,7 +978,9 @@ export function updateShot(id: string, fields: Partial<Pick<Shot, 'prompt' | 'du
   const current = getShot(id)
   if (!current) return null
   if (fields.selectedVideoId) {
-    const owns = db.prepare('SELECT id FROM shot_videos WHERE id = ? AND shot_id = ?').get(fields.selectedVideoId, id)
+    const owns = db.prepare(`
+      SELECT id FROM shot_videos WHERE id = ? AND shot_id = ? AND deleted_at IS NULL
+    `).get(fields.selectedVideoId, id)
     if (!owns) return null
   }
   db.prepare(`
@@ -838,11 +999,15 @@ export function updateShot(id: string, fields: Partial<Pick<Shot, 'prompt' | 'du
 
 export function deleteShot(id: string): boolean {
   const db = getDb()
-  const row = db.prepare('SELECT episode_id, shot_order FROM shots WHERE id = ?').get(id) as SqlRow | undefined
+  const row = db.prepare(`
+    SELECT episode_id, shot_order FROM shots WHERE id = ? AND deleted_at IS NULL
+  `).get(id) as SqlRow | undefined
   if (!row) return false
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM shots WHERE id = ?').run(id)
-    const remaining = db.prepare('SELECT id FROM shots WHERE episode_id = ? ORDER BY shot_order').all(row.episode_id) as SqlRow[]
+    archiveShotIds(db, [id], now())
+    const remaining = db.prepare(`
+      SELECT id FROM shots WHERE episode_id = ? AND deleted_at IS NULL ORDER BY shot_order
+    `).all(row.episode_id) as SqlRow[]
     const update = db.prepare('UPDATE shots SET shot_order = ? WHERE id = ?')
     remaining.forEach((shot, index) => update.run(index + 1, shot.id))
   })
@@ -869,8 +1034,22 @@ export function markShotGenerating(shotId: string, taskId: string, model: string
   return getShot(shotId)!
 }
 
+export function markShotSubmitting(shotId: string): Shot {
+  const db = getDb()
+  const result = db.prepare(`
+    UPDATE shots
+    SET status = 'generating', provider_task_id = NULL, error = NULL, updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL AND status != 'generating'
+  `).run(now(), shotId)
+  if (result.changes === 0) throw new Error('分镜不存在或已在生成中')
+  return getShot(shotId)!
+}
+
 export function markShotFailed(shotId: string, error: string): Shot {
-  getDb().prepare(`UPDATE shots SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`)
+  getDb().prepare(`
+    UPDATE shots SET status = 'failed', error = ?, updated_at = ?
+    WHERE id = ? AND deleted_at IS NULL
+  `)
     .run(error.slice(0, 1000), now(), shotId)
   return getShot(shotId)!
 }
@@ -886,7 +1065,9 @@ export function addShotVideo(shotId: string, input: {
   const timestamp = now()
   const transaction = db.transaction(() => {
     const pending = db.prepare(`
-      SELECT id FROM shot_videos WHERE shot_id = ? AND provider_task_id = ? ORDER BY created_at DESC LIMIT 1
+      SELECT id FROM shot_videos
+      WHERE shot_id = ? AND provider_task_id = ? AND deleted_at IS NULL
+      ORDER BY created_at DESC LIMIT 1
     `).get(shotId, input.providerTaskId) as SqlRow | undefined
     const id = pending ? String(pending.id) : randomUUID()
     if (pending) {
@@ -910,7 +1091,10 @@ export function addShotVideo(shotId: string, input: {
 
 export function updateShotVideo(shotId: string, videoId: string, fields: { rating?: number | null; note?: string }): Shot | null {
   const db = getDb()
-  const current = db.prepare('SELECT id, rating, note FROM shot_videos WHERE id = ? AND shot_id = ? AND path IS NOT NULL')
+  const current = db.prepare(`
+    SELECT id, rating, note FROM shot_videos
+    WHERE id = ? AND shot_id = ? AND path IS NOT NULL AND deleted_at IS NULL
+  `)
     .get(videoId, shotId) as SqlRow | undefined
   if (!current) return null
   const transaction = db.transaction(() => {
@@ -928,27 +1112,38 @@ export function updateShotVideo(shotId: string, videoId: string, fields: { ratin
 
 export function deleteShotVideo(shotId: string, videoId: string): { shot: Shot; path: string } | null {
   const db = getDb()
-  const current = db.prepare('SELECT path FROM shot_videos WHERE id = ? AND shot_id = ? AND path IS NOT NULL')
+  const current = db.prepare(`
+    SELECT path FROM shot_videos
+    WHERE id = ? AND shot_id = ? AND path IS NOT NULL AND deleted_at IS NULL
+  `)
     .get(videoId, shotId) as SqlRow | undefined
   if (!current) return null
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM shot_videos WHERE id = ?').run(videoId)
+    const timestamp = now()
+    db.prepare(`
+      UPDATE shot_videos SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL
+    `).run(timestamp, videoId)
     const replacement = db.prepare(`
-      SELECT id FROM shot_videos WHERE shot_id = ? AND path IS NOT NULL ORDER BY created_at DESC LIMIT 1
+      SELECT id FROM shot_videos
+      WHERE shot_id = ? AND path IS NOT NULL AND deleted_at IS NULL
+      ORDER BY created_at DESC LIMIT 1
     `).get(shotId) as SqlRow | undefined
-    const shot = db.prepare('SELECT status, selected_video_id FROM shots WHERE id = ?').get(shotId) as SqlRow
+    const shot = db.prepare(`
+      SELECT status, selected_video_id, episode_id FROM shots WHERE id = ? AND deleted_at IS NULL
+    `).get(shotId) as SqlRow
     const selectedVideoId = shot.selected_video_id ? String(shot.selected_video_id) : null
     if (selectedVideoId === videoId) {
+      archiveEditEpisodeIds(db, [String(shot.episode_id)], timestamp)
       db.prepare(`
         UPDATE shots SET selected_video_id = ?, status = ?, updated_at = ? WHERE id = ?
       `).run(
         replacement ? String(replacement.id) : null,
         String(shot.status) === 'generating' ? 'generating' : replacement ? 'success' : 'pending',
-        now(),
+        timestamp,
         shotId,
       )
     } else {
-      db.prepare('UPDATE shots SET updated_at = ? WHERE id = ?').run(now(), shotId)
+      db.prepare('UPDATE shots SET updated_at = ? WHERE id = ?').run(timestamp, shotId)
     }
   })
   transaction()
@@ -957,11 +1152,15 @@ export function deleteShotVideo(shotId: string, videoId: string): { shot: Shot; 
 
 export function saveEditDraft(projectId: string, episodeId: string, clips: EditClip[]): EditDraft {
   const db = getDb()
-  const current = db.prepare('SELECT id FROM edits WHERE episode_id = ?').get(episodeId) as SqlRow | undefined
+  const current = db.prepare('SELECT id, deleted_at FROM edits WHERE episode_id = ?').get(episodeId) as SqlRow | undefined
   const timestamp = now()
   if (current) {
-    db.prepare('UPDATE edits SET clips_json = ?, updated_at = ? WHERE episode_id = ?')
-      .run(JSON.stringify(clips), timestamp, episodeId)
+    db.prepare(`
+      UPDATE edits
+      SET clips_json = ?, output_path = CASE WHEN deleted_at IS NULL THEN output_path ELSE NULL END,
+        deleted_at = NULL, updated_at = ?
+      WHERE episode_id = ?
+    `).run(JSON.stringify(clips), timestamp, episodeId)
   } else {
     db.prepare(`
       INSERT INTO edits (id, project_id, episode_id, clips_json, output_path, updated_at)
@@ -973,7 +1172,7 @@ export function saveEditDraft(projectId: string, episodeId: string, clips: EditC
 
 export function setEditOutput(projectId: string, episodeId: string, outputPath: string): EditDraft {
   const db = getDb()
-  const current = db.prepare('SELECT id FROM edits WHERE episode_id = ?').get(episodeId)
+  const current = db.prepare('SELECT id FROM edits WHERE episode_id = ? AND deleted_at IS NULL').get(episodeId)
   if (!current) saveEditDraft(projectId, episodeId, [])
   db.prepare('UPDATE edits SET output_path = ?, updated_at = ? WHERE episode_id = ?')
     .run(outputPath, now(), episodeId)

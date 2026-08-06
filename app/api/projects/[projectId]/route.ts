@@ -44,8 +44,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
 export async function DELETE(_: Request, { params }: { params: Promise<{ projectId: string }> }) {
   try {
     const { projectId } = await params
+    const bundle = getProjectBundle(projectId)
+    if (!bundle) return fail('项目不存在', 404)
+    if (bundle.shots.some(shot => shot.status === 'generating')) {
+      return fail('仍有视频正在生成，完成后才能删除项目', 409)
+    }
     return deleteProject(projectId) ? ok({ deleted: true }) : fail('项目不存在', 404)
   } catch (error) {
-    return fail(error)
+    return fail(error, error instanceof Error && error.message.includes('正在生成') ? 409 : 500)
   }
 }

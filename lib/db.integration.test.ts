@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -11,14 +11,23 @@ import {
   createEpisode,
   createProject,
   createShot,
+  deleteEntity,
   deleteEntityImage,
+  deleteEpisode,
+  deleteProject,
+  deleteShot,
   deleteShotVideo,
+  getDb,
   getProject,
   getProjectBundle,
+  listProjects,
   markShotGenerating,
+  markShotSubmitting,
   replaceGeneratedScript,
+  replaceStoryboard,
   rewriteGeneratedScript,
   saveEditDraft,
+  setEditOutput,
   updateProject,
   updateShot,
   updateShotVideo,
@@ -152,8 +161,18 @@ describe('分镜视频版本', () => {
       .toMatchObject({ rating: 5, note: '保留动作节奏' })
 
     const first = updated.videos.find(video => video.providerTaskId === 'task-1')!
+    const edit = saveEditDraft(project.id, bundle.episodes[0].id, [{
+      id: 'video-version-clip',
+      shotId: shot.id,
+      enabled: true,
+      start: 0,
+      end: 5,
+    }])
     expect(deleteShotVideo(shot.id, latest.id)).toMatchObject({ path: 'videos/take-2.mp4' })
     expect(getProjectBundle(project.id)?.shots[0].selectedVideoId).toBe(first.id)
+    expect(getProjectBundle(project.id)?.edits).toHaveLength(0)
+    expect(getDb().prepare('SELECT deleted_at, clips_json FROM edits WHERE id = ?').get(edit.id))
+      .toMatchObject({ deleted_at: expect.any(String), clips_json: expect.stringContaining(shot.id) })
     expect(deleteShotVideo(shot.id, first.id)).toMatchObject({ path: 'videos/take-1.mp4' })
     expect(getProjectBundle(project.id)?.shots[0]).toMatchObject({ status: 'pending', selectedVideoId: null })
   })
@@ -175,6 +194,173 @@ describe('素材图片版本', () => {
     expect(getProjectBundle(project.id)?.entities.find(item => item.id === entity.id)?.selectedImageId).toBe(first.id)
     expect(deleteEntityImage(entity.id, first.id)).toMatchObject({ path: 'images/first.png' })
     expect(getProjectBundle(project.id)?.entities.find(item => item.id === entity.id)?.selectedImageId).toBeNull()
+  })
+})
+
+describe('工作流软删除与本地素材保留', () => {
+  it('重新生成只隐藏旧记录，并允许复用原分集号与镜头序号', () => {
+    temporaryDataDir = mkdtempSync(path.join(tmpdir(), 'xuefeng-short-drama-replace-test-'))
+    vi.stubEnv('DATA_DIR', temporaryDataDir)
+    const project = createProject({ title: '软删除替换测试', brief: '测试重新生成' })
+    const initial = replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '旧第一集', content: '旧内容' },
+    ]), 1)
+    const oldEpisode = initial.episodes[0]
+    const oldShot = createShot(project.id, oldEpisode.id)
+    const oldEdit = saveEditDraft(project.id, oldEpisode.id, [{
+      id: 'old-clip',
+      shotId: oldShot.id,
+      enabled: true,
+      start: 0,
+      end: 5,
+    }])
+
+    expect(replaceStoryboard(project.id, oldEpisode.id, [{
+      shotOrder: 1,
+      prompt: '新分镜',
+      duration: 5,
+      referenceEntityIds: [],
+    }])).toHaveLength(1)
+    const archivedShot = getDb().prepare(`
+      SELECT deleted_at, shot_order, deleted_shot_order FROM shots WHERE id = ?
+    `).get(oldShot.id) as { deleted_at: string | null; shot_order: number; deleted_shot_order: number }
+    expect(archivedShot.deleted_at).not.toBeNull()
+    expect(archivedShot.shot_order).toBeLessThan(0)
+    expect(archivedShot.deleted_shot_order).toBe(1)
+    expect(getProjectBundle(project.id)?.edits).toHaveLength(0)
+    expect(getDb().prepare('SELECT deleted_at, clips_json FROM edits WHERE id = ?').get(oldEdit.id))
+      .toMatchObject({ deleted_at: expect.any(String), clips_json: expect.stringContaining(oldShot.id) })
+
+    const replaced = replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '新第一集', content: '新内容' },
+    ]), 1)
+    expect(replaced.episodes).toHaveLength(1)
+    expect(replaced.episodes[0]).toMatchObject({ episodeNumber: 1, title: '新第一集' })
+    expect(replaced.shots).toHaveLength(0)
+    const archivedEpisode = getDb().prepare(`
+      SELECT deleted_at, episode_number, deleted_episode_number FROM episodes WHERE id = ?
+    `).get(oldEpisode.id) as {
+      deleted_at: string | null
+      episode_number: number
+      deleted_episode_number: number
+    }
+    expect(archivedEpisode.deleted_at).not.toBeNull()
+    expect(archivedEpisode.episode_number).toBeLessThan(0)
+    expect(archivedEpisode.deleted_episode_number).toBe(1)
+  })
+
+  it('生成中的视频阻止重拆分，避免任务版本失去跟踪', () => {
+    temporaryDataDir = mkdtempSync(path.join(tmpdir(), 'xuefeng-short-drama-lock-test-'))
+    vi.stubEnv('DATA_DIR', temporaryDataDir)
+    const project = createProject({ title: '生成互斥测试', brief: '测试重拆分互斥' })
+    const bundle = replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '第一集', content: '第一集内容' },
+    ]), 1)
+    const shot = createShot(project.id, bundle.episodes[0].id)
+    markShotSubmitting(shot.id)
+
+    expect(() => replaceStoryboard(project.id, bundle.episodes[0].id, [{
+      shotOrder: 1,
+      prompt: '不应写入的新分镜',
+      duration: 5,
+      referenceEntityIds: [],
+    }])).toThrow('本集仍有视频正在生成')
+    expect(getProjectBundle(project.id)?.shots).toHaveLength(1)
+    expect(getProjectBundle(project.id)?.shots[0]).toMatchObject({
+      id: shot.id,
+      status: 'generating',
+      providerTaskId: null,
+    })
+  })
+
+  it('各级删除只写软删除标记，所有本地图片和视频文件保持不变', () => {
+    temporaryDataDir = mkdtempSync(path.join(tmpdir(), 'xuefeng-short-drama-soft-delete-test-'))
+    vi.stubEnv('DATA_DIR', temporaryDataDir)
+    const imagePath = path.join(temporaryDataDir, 'media', 'images', 'keep.png')
+    const videoPath = path.join(temporaryDataDir, 'media', 'videos', 'keep.mp4')
+    const exportPath = path.join(temporaryDataDir, 'media', 'exports', 'keep.mp4')
+    mkdirSync(path.dirname(imagePath), { recursive: true })
+    mkdirSync(path.dirname(videoPath), { recursive: true })
+    mkdirSync(path.dirname(exportPath), { recursive: true })
+    writeFileSync(imagePath, 'image')
+    writeFileSync(videoPath, 'video')
+    writeFileSync(exportPath, 'export')
+
+    const project = createProject({ title: '素材保留测试', brief: '测试所有删除层级' })
+    const bundle = replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '第一集', content: '第一集内容' },
+      { episodeNumber: 2, title: '第二集', content: '第二集内容' },
+    ]), 2)
+    const entity = bundle.entities.find(item => item.kind === 'character')!
+    const image = addEntityImage(entity.id, 'images/keep.png', '保留图片').selectedImage!
+    const firstShot = createShot(project.id, bundle.episodes[0].id)
+    markShotGenerating(firstShot.id, 'task-keep', 'seedance-model', '720p')
+    const video = addShotVideo(firstShot.id, {
+      path: 'videos/keep.mp4',
+      providerTaskId: 'task-keep',
+      model: 'seedance-model',
+      duration: 5,
+      resolution: '720p',
+    }).selectedVideo!
+    saveEditDraft(project.id, bundle.episodes[0].id, [{
+      id: 'keep-clip',
+      shotId: firstShot.id,
+      enabled: true,
+      start: 0,
+      end: 5,
+    }])
+    setEditOutput(project.id, bundle.episodes[0].id, 'exports/keep.mp4')
+
+    expect(deleteEntityImage(entity.id, image.id)).not.toBeNull()
+    expect(deleteShotVideo(firstShot.id, video.id)).not.toBeNull()
+    expect(getDb().prepare('SELECT deleted_at FROM entity_images WHERE id = ?').get(image.id))
+      .toMatchObject({ deleted_at: expect.any(String) })
+    expect(getDb().prepare('SELECT deleted_at FROM shot_videos WHERE id = ?').get(video.id))
+      .toMatchObject({ deleted_at: expect.any(String) })
+    expect(existsSync(imagePath)).toBe(true)
+    expect(existsSync(videoPath)).toBe(true)
+    expect(existsSync(exportPath)).toBe(true)
+
+    const secondEntity = getProjectBundle(project.id)!.entities.find(item => item.kind === 'scene')!
+    const selectedImage = addEntityImage(secondEntity.id, 'images/keep.png', '父级删除前选中版本').selectedImage!
+    const secondShot = createShot(project.id, bundle.episodes[1].id)
+    markShotGenerating(secondShot.id, 'task-selected', 'seedance-model', '720p')
+    const selectedVideo = addShotVideo(secondShot.id, {
+      path: 'videos/keep.mp4',
+      providerTaskId: 'task-selected',
+      model: 'seedance-model',
+      duration: 5,
+      resolution: '720p',
+    }).selectedVideo!
+    const secondEdit = saveEditDraft(project.id, bundle.episodes[1].id, [{
+      id: 'selected-clip',
+      shotId: secondShot.id,
+      enabled: true,
+      start: 0,
+      end: 5,
+    }])
+    expect(deleteEntity(secondEntity.id)).toBe(true)
+    expect(deleteShot(secondShot.id)).toBe(true)
+    expect(getDb().prepare('SELECT selected_image_id FROM entities WHERE id = ?').get(secondEntity.id))
+      .toEqual({ selected_image_id: selectedImage.id })
+    expect(getDb().prepare('SELECT selected_video_id FROM shots WHERE id = ?').get(secondShot.id))
+      .toEqual({ selected_video_id: selectedVideo.id })
+    expect(getDb().prepare('SELECT deleted_at, clips_json FROM edits WHERE id = ?').get(secondEdit.id))
+      .toMatchObject({ deleted_at: expect.any(String), clips_json: expect.stringContaining(secondShot.id) })
+    expect(deleteEpisode(bundle.episodes[1].id)).toBe(true)
+    expect(deleteProject(project.id)).toBe(true)
+
+    expect(getProject(project.id)).toBeNull()
+    expect(getProjectBundle(project.id)).toBeNull()
+    expect(listProjects()).toHaveLength(0)
+    for (const table of ['projects', 'episodes', 'entities', 'entity_images', 'shots', 'shot_videos', 'edits'] as const) {
+      const active = getDb().prepare(`SELECT COUNT(*) count FROM ${table} WHERE deleted_at IS NULL`)
+        .get() as { count: number }
+      expect(active.count).toBe(0)
+    }
+    expect(existsSync(imagePath)).toBe(true)
+    expect(existsSync(videoPath)).toBe(true)
+    expect(existsSync(exportPath)).toBe(true)
   })
 })
 

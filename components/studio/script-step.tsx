@@ -165,7 +165,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
     if (planned !== null && planned < episodeCount) return toast.error('计划总集数不能小于本次生成集数')
     if (bundle.episodes.length > 0 && !await confirmToast({
       title: '重新生成整套剧本？',
-      description: '现有分集、角色、空镜场景、道具、分镜和剪辑草稿都会被替换，此操作不可撤销。',
+      description: '现有分集、角色、空镜场景、道具、分镜和剪辑草稿将从工作区隐藏并替换；数据库记录与本地素材文件保留。',
       confirmLabel: '重新生成',
     })) return
 
@@ -322,7 +322,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
   const removeEpisode = async (episode: Episode) => {
     if (!await confirmToast({
       title: `删除第 ${episode.episodeNumber} 集？`,
-      description: '本集剧本及其全部分镜和剪辑记录都会被删除，此操作不可撤销。',
+      description: '本集剧本、分镜和剪辑记录将从工作区隐藏；数据库记录与本地素材文件保留。',
       confirmLabel: '删除分集',
     })) return
     try {

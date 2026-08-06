@@ -23,8 +23,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sh
 export async function DELETE(_: Request, { params }: { params: Promise<{ shotId: string }> }) {
   try {
     const { shotId } = await params
+    const shot = getShot(shotId)
+    if (!shot) return fail('分镜不存在', 404)
+    if (shot.status === 'generating') return fail('分镜视频正在生成，完成后才能删除镜头', 409)
     return deleteShot(shotId) ? ok({ deleted: true }) : fail('分镜不存在', 404)
   } catch (error) {
-    return fail(error)
+    return fail(error, error instanceof Error && error.message.includes('正在生成') ? 409 : 500)
   }
 }

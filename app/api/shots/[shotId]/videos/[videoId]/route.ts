@@ -1,6 +1,5 @@
 import { z } from 'zod'
 import { deleteShotVideo, getShot, updateShotVideo } from '@/lib/db'
-import { deleteMediaFile } from '@/lib/local-media'
 import { fail, ok } from '@/lib/api'
 
 const updateSchema = z.object({
@@ -27,7 +26,6 @@ export async function DELETE(_: Request, { params }: { params: Promise<{ shotId:
     if (shot.status === 'generating') return fail('分镜视频正在生成，暂不能删除版本', 409)
     const deleted = deleteShotVideo(shotId, videoId)
     if (!deleted) return fail('视频版本不存在', 404)
-    await deleteMediaFile(deleted.path)
     return ok(deleted.shot)
   } catch (error) {
     return fail(error)

@@ -5,6 +5,7 @@ import {
   getShot,
   markShotFailed,
   markShotGenerating,
+  markShotSubmitting,
 } from '@/lib/db'
 import { fileToDataUrl, saveRemoteFile } from '@/lib/local-media'
 import { createSeedanceTask, querySeedanceTask, type SeedanceContent } from '@/lib/providers/seedance'
@@ -24,6 +25,7 @@ const createSchema = z.object({
 })
 
 export async function POST(request: Request, { params }: { params: Promise<{ shotId: string }> }) {
+  let submittingShotId: string | null = null
   try {
     const { shotId } = await params
     const body = createSchema.parse(await request.json())
@@ -59,6 +61,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ sho
         role: 'reference_image',
       })
     }
+    markShotSubmitting(shot.id)
+    submittingShotId = shot.id
     const taskId = await createSeedanceTask({
       model: model.id,
       content,
@@ -68,7 +72,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ sho
     })
     return ok(markShotGenerating(shot.id, taskId, model.id, resolution), { status: 202 })
   } catch (error) {
-    return fail(error, error instanceof z.ZodError ? 400 : 500)
+    if (submittingShotId && getShot(submittingShotId)?.status === 'generating') {
+      markShotFailed(submittingShotId, error instanceof Error ? error.message : 'Seedance 任务提交失败')
+    }
+    const status = error instanceof z.ZodError
+      ? 400
+      : error instanceof Error && error.message.includes('已在生成中')
+        ? 409
+        : 500
+    return fail(error, status)
   }
 }
 

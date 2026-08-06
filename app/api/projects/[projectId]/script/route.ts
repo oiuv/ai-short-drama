@@ -84,6 +84,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     }
 
     if (body.action === 'generate') {
+      if (bundle.shots.some(shot => shot.status === 'generating')) {
+        return fail('仍有视频正在生成，完成后才能重新生成整本剧本', 409)
+      }
       if (body.plannedEpisodes !== null && body.plannedEpisodes < body.episodeCount) {
         return fail('计划总集数不能小于本次生成集数', 400)
       }
@@ -148,7 +151,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     return ok(rewriteGeneratedScript(project.id, body.startEpisode, generated))
   } catch (error) {
     if (error instanceof z.ZodError) return fail(error.issues[0]?.message || '剧本请求参数无效', 400)
-    return fail(error, 500)
+    return fail(error, error instanceof Error && error.message.includes('正在生成') ? 409 : 500)
   }
 }
 
@@ -186,8 +189,11 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ p
     const episodeId = new URL(request.url).searchParams.get('episodeId')
     const bundle = getProjectBundle(projectId)
     if (!episodeId || !bundle?.episodes.some(episode => episode.id === episodeId)) return fail('分集不存在', 404)
+    if (bundle.shots.some(shot => shot.episodeId === episodeId && shot.status === 'generating')) {
+      return fail('本集仍有视频正在生成，完成后才能删除分集', 409)
+    }
     return deleteEpisode(episodeId) ? ok({ deleted: true }) : fail('分集不存在', 404)
   } catch (error) {
-    return fail(error)
+    return fail(error, error instanceof Error && error.message.includes('正在生成') ? 409 : 500)
   }
 }
