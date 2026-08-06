@@ -22,8 +22,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     if (!bundle) return fail('项目不存在', 404)
     const episode = bundle.episodes.find(item => item.id === body.episodeId)
     if (!episode) return fail('分集不存在', 404)
+    if (episode.status !== 'confirmed') return fail('请先定稿本集剧本，再进入分镜制作', 409)
     if (body.action === 'add') return ok(createShot(projectId, episode.id), { status: 201 })
     if (!episode.content.trim()) return fail('本集剧本内容为空', 400)
+    const episodeEntities = bundle.entities.filter(entity => (
+      entity.episodes.length === 0 || entity.episodes.includes(episode.episodeNumber)
+    ))
 
     const generated = await generateStoryboard({
       episodeNumber: episode.episodeNumber,
@@ -31,7 +35,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       episodeContent: episode.content,
       visualStyle: bundle.project.visualStyle,
       ratio: bundle.project.ratio,
-      entities: bundle.entities.map(entity => ({
+      entities: episodeEntities.map(entity => ({
         name: entity.name,
         variant: entity.variant,
         kind: entity.kind,
@@ -39,7 +43,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       })),
     })
     const entityByName = new Map<string, string>()
-    bundle.entities.forEach(entity => {
+    episodeEntities.forEach(entity => {
       entityByName.set(normalizeName(entity.name), entity.id)
       entityByName.set(normalizeName(`${entity.name}/${entity.variant}`), entity.id)
     })

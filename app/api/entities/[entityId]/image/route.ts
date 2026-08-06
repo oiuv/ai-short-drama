@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { addEntityImage, getEntity, getProject, selectEntityImage } from '@/lib/db'
+import { addEntityImage, deleteEntityImage, getEntity, getProject, selectEntityImage } from '@/lib/db'
 import { buildEntityImagePrompt } from '@/lib/prompts'
 import { generateSeedreamImage } from '@/lib/providers/seedream'
-import { saveDataUrl } from '@/lib/local-media'
+import { deleteMediaFile, saveDataUrl } from '@/lib/local-media'
 import { fail, ok } from '@/lib/api'
 
 export const maxDuration = 600
@@ -11,6 +11,7 @@ const schema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('generate'), referenceCurrent: z.boolean().optional(), threeView: z.boolean().optional() }),
   z.object({ action: z.literal('upload'), dataUrl: z.string().min(20) }),
   z.object({ action: z.literal('select'), imageId: z.string().uuid() }),
+  z.object({ action: z.literal('delete'), imageId: z.string().uuid() }),
 ])
 
 export async function POST(request: Request, { params }: { params: Promise<{ entityId: string }> }) {
@@ -19,6 +20,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ ent
     const entity = getEntity(entityId)
     if (!entity) return fail('素材不存在', 404)
     const body = schema.parse(await request.json())
+    if (body.action === 'delete') {
+      const deleted = deleteEntityImage(entity.id, body.imageId)
+      if (!deleted) return fail('图片版本不存在', 404)
+      await deleteMediaFile(deleted.path)
+      return ok(deleted.entity)
+    }
     if (body.action === 'select') {
       const selected = selectEntityImage(entity.id, body.imageId)
       return selected ? ok(selected) : fail('图片版本不存在', 404)

@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -124,4 +124,12 @@ export async function getMediaStat(relativePath: string) {
 
 export function streamMedia(relativePath: string, start?: number, end?: number) {
   return createReadStream(resolveMediaPath(relativePath), { start, end })
+}
+
+export async function deleteMediaFile(relativePath: string): Promise<void> {
+  try {
+    await unlink(resolveMediaPath(relativePath))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
 }

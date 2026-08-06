@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   appendGeneratedScript,
+  confirmAllDraftEpisodes,
   createEpisode,
   deleteEpisode,
   getProject,
@@ -42,6 +43,7 @@ const requestSchema = z.discriminatedUnion('action', [
     instruction: z.string().trim().min(1).max(10_000),
   }),
   z.object({ action: z.literal('add') }),
+  z.object({ action: z.literal('confirm-all') }),
 ])
 
 const updateSchema = z.object({
@@ -57,10 +59,29 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     const body = requestSchema.parse(await request.json())
     const project = getProject(projectId)
     if (!project) return fail('项目不存在', 404)
-    if (body.action === 'add') return ok(createEpisode(project.id), { status: 201 })
+    if (body.action === 'add') {
+      const current = getProjectBundle(project.id)
+      if (!current) return fail('项目不存在', 404)
+      const currentMax = Math.max(0, ...current.episodes.map(episode => episode.episodeNumber))
+      if (project.plannedEpisodes !== null && currentMax >= project.plannedEpisodes) {
+        return fail(`计划总集数为 ${project.plannedEpisodes} 集，不能继续添加分集`, 409)
+      }
+      return ok(createEpisode(project.id), { status: 201 })
+    }
+    if (body.action === 'confirm-all') {
+      const current = getProjectBundle(project.id)
+      const empty = current?.episodes.find(episode => episode.status === 'draft' && !episode.content.trim())
+      if (empty) return fail(`第 ${empty.episodeNumber} 集内容为空，不能批量定稿`, 400)
+      return ok(confirmAllDraftEpisodes(project.id))
+    }
     if (!project.brief.trim()) return fail('请先填写创作需求或原始素材', 400)
     const bundle = getProjectBundle(project.id)
     if (!bundle) return fail('项目不存在', 404)
+
+    const maxEpisodeNumber = Math.max(0, ...bundle.episodes.map(episode => episode.episodeNumber))
+    if (body.action === 'continue' && body.plannedEpisodes !== null && body.plannedEpisodes < maxEpisodeNumber) {
+      return fail(`计划总集数不能小于当前已存在的第 ${maxEpisodeNumber} 集`, 400)
+    }
 
     if (body.action === 'generate') {
       if (body.plannedEpisodes !== null && body.plannedEpisodes < body.episodeCount) {
@@ -78,9 +99,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
 
     if (body.action === 'continue') {
       if (bundle.episodes.length === 0) return fail('请先生成第一批剧本，再进行续写', 400)
-      const startEpisode = Math.max(...bundle.episodes.map(episode => episode.episodeNumber)) + 1
+      const startEpisode = maxEpisodeNumber + 1
       const endEpisode = startEpisode + body.episodeCount - 1
-      if (body.plannedEpisodes !== null && endEpisode > body.plannedEpisodes) {
+      const effectivePlannedEpisodes = body.isFinale ? endEpisode : body.plannedEpisodes
+      if (!body.isFinale && effectivePlannedEpisodes !== null && endEpisode > effectivePlannedEpisodes) {
         return fail(`本次续写将到第 ${endEpisode} 集，超过计划总集数 ${body.plannedEpisodes}`, 400)
       }
       const effectiveBrief = body.newBrief || project.brief
@@ -90,13 +112,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         mode: 'continue',
         startEpisode,
         episodeCount: body.episodeCount,
-        plannedEpisodes: body.plannedEpisodes,
+        plannedEpisodes: effectivePlannedEpisodes,
         existingEpisodes: bundle.episodes,
         instruction: body.instruction,
         isFinale: body.isFinale,
       })
       return ok(appendGeneratedScript(project.id, generated, {
-        plannedEpisodes: body.plannedEpisodes,
+        plannedEpisodes: effectivePlannedEpisodes,
         brief: body.newBrief,
       }))
     }
@@ -121,7 +143,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       plannedEpisodes: project.plannedEpisodes,
       existingEpisodes: bundle.episodes,
       instruction: body.instruction,
-      isFinale: project.plannedEpisodes !== null && endEpisode >= project.plannedEpisodes,
+      isFinale: project.plannedEpisodes !== null && endEpisode === project.plannedEpisodes,
     })
     return ok(rewriteGeneratedScript(project.id, body.startEpisode, generated))
   } catch (error) {
@@ -135,7 +157,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     const { projectId } = await params
     const body = updateSchema.parse(await request.json())
     const bundle = getProjectBundle(projectId)
-    if (!bundle?.episodes.some(episode => episode.id === body.episodeId)) return fail('分集不存在', 404)
+    if (!bundle) return fail('项目不存在', 404)
+    const current = bundle.episodes.find(episode => episode.id === body.episodeId)
+    if (!current) return fail('分集不存在', 404)
+    if (body.status === 'confirmed' && !(body.content ?? current.content).trim()) {
+      return fail('本集剧本内容为空，不能定稿', 400)
+    }
+    const changesLockedContent = (body.title !== undefined && body.title !== current.title)
+      || (body.content !== undefined && body.content !== current.content)
+    if (current.status === 'confirmed' && body.status !== 'draft' && changesLockedContent) {
+      return fail('本集已定稿，请先取消定稿再修改', 409)
+    }
+    if (body.status === 'draft' && current.status === 'confirmed') {
+      const hasDownstreamData = bundle.shots.some(shot => shot.episodeId === current.id)
+        || bundle.edits.some(edit => edit.episodeId === current.id)
+      if (hasDownstreamData) return fail('本集已有分镜或剪辑内容，不能取消定稿', 409)
+    }
     const episode = updateEpisode(body.episodeId, body)
     return episode ? ok(episode) : fail('分集不存在', 404)
   } catch (error) {

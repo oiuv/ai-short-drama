@@ -5,14 +5,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GeneratedScript } from './types'
 import {
   appendGeneratedScript,
+  addEntityImage,
+  addShotVideo,
+  confirmAllDraftEpisodes,
+  createEpisode,
   createProject,
   createShot,
+  deleteEntityImage,
+  deleteShotVideo,
   getProject,
   getProjectBundle,
+  markShotGenerating,
   replaceGeneratedScript,
   rewriteGeneratedScript,
   saveEditDraft,
   updateProject,
+  updateShot,
+  updateShotVideo,
 } from './db'
 
 let temporaryDataDir = ''
@@ -112,5 +121,76 @@ describe('剧本分批生成数据事务', () => {
     global.__shortDramaDb = undefined
     expect(getProject(created.id)?.plannedEpisodes).toBe(12)
     expect(getProjectBundle(created.id)?.episodes).toHaveLength(3)
+  })
+})
+
+describe('分镜视频版本', () => {
+  it('保存生成快照并支持评分、备注、切换后安全删除', () => {
+    temporaryDataDir = mkdtempSync(path.join(tmpdir(), 'xuefeng-short-drama-video-test-'))
+    vi.stubEnv('DATA_DIR', temporaryDataDir)
+    const project = createProject({ title: '版本测试', brief: '测试视频版本' })
+    const bundle = replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '第一集', content: '第一集内容' },
+    ]), 1)
+    const shot = createShot(project.id, bundle.episodes[0].id)
+    updateShot(shot.id, { prompt: '雨夜追车，低机位跟拍' })
+
+    markShotGenerating(shot.id, 'task-1', 'seedance-model', '720p')
+    let updated = addShotVideo(shot.id, {
+      path: 'videos/take-1.mp4', providerTaskId: 'task-1', model: 'seedance-model', duration: 5, resolution: '720p',
+    })
+    expect(updated.selectedVideo?.prompt).toBe('雨夜追车，低机位跟拍')
+
+    updateShot(shot.id, { prompt: '雨夜追车，航拍转近景' })
+    markShotGenerating(shot.id, 'task-2', 'seedance-model', '1080p')
+    updated = addShotVideo(shot.id, {
+      path: 'videos/take-2.mp4', providerTaskId: 'task-2', model: 'seedance-model', duration: 6, resolution: '1080p',
+    })
+    const latest = updated.selectedVideo!
+    expect(latest.prompt).toBe('雨夜追车，航拍转近景')
+    expect(updateShotVideo(shot.id, latest.id, { rating: 5, note: '保留动作节奏' })?.selectedVideo)
+      .toMatchObject({ rating: 5, note: '保留动作节奏' })
+
+    const first = updated.videos.find(video => video.providerTaskId === 'task-1')!
+    expect(deleteShotVideo(shot.id, latest.id)).toMatchObject({ path: 'videos/take-2.mp4' })
+    expect(getProjectBundle(project.id)?.shots[0].selectedVideoId).toBe(first.id)
+    expect(deleteShotVideo(shot.id, first.id)).toMatchObject({ path: 'videos/take-1.mp4' })
+    expect(getProjectBundle(project.id)?.shots[0]).toMatchObject({ status: 'pending', selectedVideoId: null })
+  })
+})
+
+describe('素材图片版本', () => {
+  it('删除选定图片后自动切换到最近的保留版本', () => {
+    temporaryDataDir = mkdtempSync(path.join(tmpdir(), 'xuefeng-short-drama-image-test-'))
+    vi.stubEnv('DATA_DIR', temporaryDataDir)
+    const project = createProject({ title: '素材版本测试', brief: '测试图片版本' })
+    const bundle = replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '第一集', content: '第一集内容' },
+    ]), 1)
+    const entity = bundle.entities.find(item => item.kind === 'character')!
+    const first = addEntityImage(entity.id, 'images/first.png', '第一版').selectedImage!
+    const second = addEntityImage(entity.id, 'images/second.png', '第二版').selectedImage!
+
+    expect(deleteEntityImage(entity.id, second.id)).toMatchObject({ path: 'images/second.png' })
+    expect(getProjectBundle(project.id)?.entities.find(item => item.id === entity.id)?.selectedImageId).toBe(first.id)
+    expect(deleteEntityImage(entity.id, first.id)).toMatchObject({ path: 'images/first.png' })
+    expect(getProjectBundle(project.id)?.entities.find(item => item.id === entity.id)?.selectedImageId).toBeNull()
+  })
+})
+
+describe('分集批量定稿', () => {
+  it('原子定稿全部非空草稿并拒绝空白分集', () => {
+    temporaryDataDir = mkdtempSync(path.join(tmpdir(), 'xuefeng-short-drama-confirm-test-'))
+    vi.stubEnv('DATA_DIR', temporaryDataDir)
+    const project = createProject({ title: '批量定稿测试', brief: '测试定稿' })
+    replaceGeneratedScript(project.id, generatedScript([
+      { episodeNumber: 1, title: '第一集', content: '第一集内容' },
+      { episodeNumber: 2, title: '第二集', content: '第二集内容' },
+    ]), 3)
+
+    expect(confirmAllDraftEpisodes(project.id).episodes.every(episode => episode.status === 'confirmed')).toBe(true)
+    createEpisode(project.id)
+    expect(() => confirmAllDraftEpisodes(project.id)).toThrow('第 3 集内容为空，不能批量定稿')
+    expect(getProjectBundle(project.id)?.episodes.find(episode => episode.episodeNumber === 3)?.status).toBe('draft')
   })
 })

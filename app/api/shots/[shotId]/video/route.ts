@@ -32,6 +32,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ sho
     if (shot.status === 'generating') return fail('该分镜正在生成中', 409)
     if (!shot.prompt.trim()) return fail('请先填写分镜提示词', 400)
     const bundle = getProjectBundle(shot.projectId)!
+    const episode = bundle.episodes.find(item => item.id === shot.episodeId)
+    if (episode?.status !== 'confirmed') return fail('请先定稿本集剧本，再生成分镜视频', 409)
     const requestedModel = body.model || process.env.SEEDANCE_MODEL || SEEDANCE_MODELS[0].id
     const model = SEEDANCE_MODELS.find(item => item.id === requestedModel) ?? SEEDANCE_MODELS[0]
     const resolution = body.resolution && model.resolutions.includes(body.resolution as never)

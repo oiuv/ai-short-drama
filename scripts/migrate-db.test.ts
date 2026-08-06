@@ -23,7 +23,19 @@ function createLegacyDatabase(): string {
       ratio TEXT NOT NULL DEFAULT '9:16',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    )
+    );
+    CREATE TABLE shot_videos (
+      id TEXT PRIMARY KEY,
+      shot_id TEXT NOT NULL,
+      path TEXT,
+      provider_task_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      duration REAL NOT NULL DEFAULT 0,
+      resolution TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO shot_videos (id, shot_id, path, provider_task_id, model, duration, resolution, created_at)
+    VALUES ('video-before-migration', 'shot-1', 'videos/legacy.mp4', 'task-1', 'seedance', 5, '720p', '2026-08-05T00:00:00.000Z');
   `)
   db.prepare(`
     INSERT INTO projects (id, title, brief, synopsis, genre, visual_style, ratio, created_at, updated_at)
@@ -65,9 +77,11 @@ describe('显式 SQLite 迁移', () => {
 
     expect(runMigrations({ dbPath })).toEqual([
       { id: '20260805213800-add-planned-episodes', status: 'applied' },
+      { id: '20260806171147-add-shot-video-details', status: 'applied' },
     ])
     expect(runMigrations({ dbPath })).toEqual([
       { id: '20260805213800-add-planned-episodes', status: 'skipped' },
+      { id: '20260806171147-add-shot-video-details', status: 'skipped' },
     ])
 
     const db = new Database(dbPath, { readonly: true })
@@ -75,6 +89,9 @@ describe('显式 SQLite 迁移', () => {
     const project = db.prepare(`
       SELECT id, title, brief, planned_episodes FROM projects WHERE id = ?
     `).get('project-before-migration') as Record<string, unknown>
+    const videoColumns = db.prepare('PRAGMA table_info(shot_videos)').all() as Array<{ name: string }>
+    const video = db.prepare('SELECT path, prompt, rating, note FROM shot_videos WHERE id = ?')
+      .get('video-before-migration') as Record<string, unknown>
     const migrationCount = db.prepare('SELECT COUNT(*) count FROM schema_migrations').get() as { count: number }
     db.close()
 
@@ -85,7 +102,9 @@ describe('显式 SQLite 迁移', () => {
       brief: '保留这条创作需求',
       planned_episodes: null,
     })
-    expect(migrationCount.count).toBe(1)
+    expect(videoColumns.map(column => column.name)).toEqual(expect.arrayContaining(['prompt', 'rating', 'note']))
+    expect(video).toEqual({ path: 'videos/legacy.mp4', prompt: '', rating: null, note: '' })
+    expect(migrationCount.count).toBe(2)
   })
 
   it('迁移失败时回滚全部修改且不记录为已完成', () => {

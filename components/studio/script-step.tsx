@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Check,
   Clock3,
+  Copy,
   FilePenLine,
   Forward,
   Loader2,
@@ -53,6 +54,8 @@ export function ScriptStep({ bundle, refresh }: Props) {
   const [generating, setGenerating] = useState(false)
   const [continuing, setContinuing] = useState(false)
   const [rewriting, setRewriting] = useState(false)
+  const [batchConfirming, setBatchConfirming] = useState(false)
+  const [episodeDirty, setEpisodeDirty] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(bundle.episodes[0]?.id ?? null)
 
   const [showContinueDialog, setShowContinueDialog] = useState(false)
@@ -66,7 +69,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
   const [rewriteEpisodeCount, setRewriteEpisodeCount] = useState<CountInput>(1)
   const [rewriteInstruction, setRewriteInstruction] = useState('')
 
-  const operationBusy = saving || generating || continuing || rewriting
+  const operationBusy = saving || generating || continuing || rewriting || batchConfirming
   const creativeBusy = generating || continuing || rewriting
   const { formatted: elapsedTime } = useTimer(creativeBusy)
   const creativeStatus = generating
@@ -104,23 +107,29 @@ export function ScriptStep({ bundle, refresh }: Props) {
     [bundle.episodes],
   )
   const maxRewriteCount = Math.max(1, Math.min(MAX_SCRIPT_EPISODES_PER_REQUEST, maxEpisodeNumber - rewriteStartEpisode + 1))
+  const draftEpisodes = useMemo(() => bundle.episodes.filter(episode => episode.status === 'draft'), [bundle.episodes])
+  const handleEpisodeDirtyChange = useCallback((dirty: boolean) => setEpisodeDirty(dirty), [])
 
-  const readPlannedEpisodes = (): number | null | undefined => {
+  const readPlannedEpisodes = (requireExistingRange = true): number | null | undefined => {
     const parsed = parsePlannedEpisodes(plannedEpisodes)
     if (!parsed.valid) {
       toast.error('计划总集数应为 1–200 的整数，或留空表示不设定')
       return undefined
     }
+    if (requireExistingRange && parsed.value !== null && parsed.value < maxEpisodeNumber) {
+      toast.error(`计划总集数不能小于当前已存在的第 ${maxEpisodeNumber} 集`)
+      return undefined
+    }
     return parsed.value
   }
 
-  const saveProject = async (quiet = false): Promise<boolean> => {
+  const saveProject = async (quiet = false, persistPlannedEpisodes = true): Promise<boolean> => {
     if (!form.genre.trim()) {
       toast.error('请选择题材或填写自定义题材')
       return false
     }
-    const planned = readPlannedEpisodes()
-    if (planned === undefined) return false
+    const planned = persistPlannedEpisodes ? readPlannedEpisodes() : undefined
+    if (persistPlannedEpisodes && planned === undefined) return false
     setSaving(true)
     try {
       await requestJson(`/api/projects/${project.id}`, {
@@ -132,7 +141,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
           genre: form.genre,
           visualStyle: form.visualStyle,
           ratio: form.ratio,
-          plannedEpisodes: planned,
+          ...(persistPlannedEpisodes ? { plannedEpisodes: planned } : {}),
         }),
       })
       await refresh(true)
@@ -151,7 +160,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
     if (!form.genre.trim()) return toast.error('请选择题材或填写自定义题材')
     const episodeCount = parseRequiredEpisodeCount(generationEpisodeCount)
     if (episodeCount === null) return toast.error(`本次生成集数必须是 1–${MAX_SCRIPT_EPISODES_PER_REQUEST} 的整数`)
-    const planned = readPlannedEpisodes()
+    const planned = readPlannedEpisodes(false)
     if (planned === undefined) return
     if (planned !== null && planned < episodeCount) return toast.error('计划总集数不能小于本次生成集数')
     if (bundle.episodes.length > 0 && !await confirmToast({
@@ -162,7 +171,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
 
     setGenerating(true)
     try {
-      if (!await saveProject(true)) return
+      if (!await saveProject(true, false)) return
       const next = await requestJson<ProjectBundle>(`/api/projects/${project.id}/script`, {
         method: 'POST',
         body: JSON.stringify({ action: 'generate', episodeCount, plannedEpisodes: planned }),
@@ -183,19 +192,21 @@ export function ScriptStep({ bundle, refresh }: Props) {
     const planned = readPlannedEpisodes()
     if (planned === undefined) return
     const endEpisode = maxEpisodeNumber + episodeCount
-    if (planned !== null && endEpisode > planned) {
+    const effectivePlanned = continueAsFinale ? endEpisode : planned
+    if (!continueAsFinale && planned !== null && endEpisode > planned) {
       return toast.error(`本次续写将到第 ${endEpisode} 集，超过计划总集数 ${planned}`)
     }
 
     setContinuing(true)
     setShowContinueDialog(false)
     try {
+      if (!await saveProject(true)) return
       const next = await requestJson<ProjectBundle>(`/api/projects/${project.id}/script`, {
         method: 'POST',
         body: JSON.stringify({
           action: 'continue',
           episodeCount,
-          plannedEpisodes: planned,
+          plannedEpisodes: effectivePlanned,
           instruction: continueInstruction.trim() || undefined,
           newBrief: continueBrief.trim() || undefined,
           isFinale: continueAsFinale,
@@ -204,6 +215,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
       const firstNewEpisode = next.episodes.find(episode => episode.episodeNumber === maxEpisodeNumber + 1)
       setSelectedId(firstNewEpisode?.id ?? next.episodes.at(-1)?.id ?? null)
       if (continueBrief.trim()) setForm(current => ({ ...current, brief: continueBrief.trim() }))
+      setPlannedEpisodes(effectivePlanned ?? '')
       setContinueInstruction('')
       setContinueBrief('')
       setContinueAsFinale(false)
@@ -240,6 +252,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
     setRewriting(true)
     setShowRewriteDialog(false)
     try {
+      if (!await saveProject(true)) return
       const next = await requestJson<ProjectBundle>(`/api/projects/${project.id}/script`, {
         method: 'POST',
         body: JSON.stringify({
@@ -269,6 +282,40 @@ export function ScriptStep({ bundle, refresh }: Props) {
       setSelectedId(episode.id)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '添加失败')
+    }
+  }
+
+  const confirmAllDrafts = async () => {
+    if (!draftEpisodes.length) return toast.info('没有待定稿分集')
+    if (episodeDirty) return toast.error('当前分集有未保存修改，请先保存后再批量定稿')
+    if (!await confirmToast({
+      title: `批量定稿 ${draftEpisodes.length} 集？`,
+      description: '定稿后这些分集才能进入分镜制作；尚未产生分镜或剪辑时可以取消定稿再修改。',
+      confirmLabel: '全部定稿',
+    })) return
+    setBatchConfirming(true)
+    try {
+      await requestJson(`/api/projects/${project.id}/script`, {
+        method: 'POST', body: JSON.stringify({ action: 'confirm-all' }),
+      })
+      await refresh(true)
+      toast.success(`已定稿 ${draftEpisodes.length} 集`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '批量定稿失败')
+    } finally {
+      setBatchConfirming(false)
+    }
+  }
+
+  const copyAllEpisodes = async () => {
+    const text = bundle.episodes
+      .map(episode => `${episode.title || `第${episode.episodeNumber}集`}\n\n${episode.content}`)
+      .join('\n\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success('已复制全部分集剧本')
+    } catch {
+      toast.error('复制失败，请检查浏览器剪贴板权限')
     }
   }
 
@@ -382,6 +429,8 @@ export function ScriptStep({ bundle, refresh }: Props) {
             </div>
             {bundle.episodes.length > 0 && (
               <div className="mt-3 grid grid-cols-2 gap-2">
+                <button className="btn-secondary !min-h-9 !px-2 text-xs" disabled={operationBusy || !draftEpisodes.length} onClick={() => void confirmAllDrafts()}>{batchConfirming ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}{batchConfirming ? '定稿中' : `批量定稿${draftEpisodes.length ? ` (${draftEpisodes.length})` : ''}`}</button>
+                <button className="btn-secondary !min-h-9 !px-2 text-xs" disabled={operationBusy} onClick={() => void copyAllEpisodes()}><Copy className="h-3.5 w-3.5" />复制全本</button>
                 <button className="btn-secondary !min-h-9 !px-2 text-xs" disabled={operationBusy} onClick={() => setShowContinueDialog(true)}>{continuing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Forward className="h-3.5 w-3.5" />}{continuing ? `续写中 ${elapsedTime}` : '续写'}</button>
                 <button className="btn-secondary !min-h-9 !px-2 text-xs" disabled={operationBusy} onClick={openRewriteDialog}>{rewriting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FilePenLine className="h-3.5 w-3.5" />}{rewriting ? `重写中 ${elapsedTime}` : '重写'}</button>
               </div>
@@ -397,7 +446,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
             {bundle.episodes.length === 0 && <div className="px-3 py-16 text-center text-sm text-[var(--muted)]">生成剧本后，分集会出现在这里。</div>}
           </div>
         </div>
-        {selected ? <EpisodeEditor key={selected.id + selected.updatedAt} projectId={project.id} episode={selected} refresh={refresh} onDelete={() => void removeEpisode(selected)} /> : <div className="panel flex items-center justify-center text-sm text-[var(--muted)]">选择一个分集开始编辑。</div>}
+        {selected ? <EpisodeEditor key={selected.id + selected.updatedAt} projectId={project.id} episode={selected} refresh={refresh} onDelete={() => void removeEpisode(selected)} onDirtyChange={handleEpisodeDirtyChange} /> : <div className="panel flex items-center justify-center text-sm text-[var(--muted)]">选择一个分集开始编辑。</div>}
       </section>
 
       {showContinueDialog && (
@@ -442,10 +491,17 @@ export function ScriptStep({ bundle, refresh }: Props) {
   )
 }
 
-function EpisodeEditor({ projectId, episode, refresh, onDelete }: { projectId: string; episode: Episode; refresh: (quiet?: boolean) => Promise<void>; onDelete: () => void }) {
+function EpisodeEditor({ projectId, episode, refresh, onDelete, onDirtyChange }: { projectId: string; episode: Episode; refresh: (quiet?: boolean) => Promise<void>; onDelete: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const [title, setTitle] = useState(episode.title)
   const [content, setContent] = useState(episode.content)
   const [saving, setSaving] = useState(false)
+  const locked = episode.status === 'confirmed'
+  const dirty = title !== episode.title || content !== episode.content
+
+  useEffect(() => {
+    onDirtyChange(dirty)
+    return () => onDirtyChange(false)
+  }, [dirty, onDirtyChange])
 
   const save = async (status = episode.status) => {
     setSaving(true)
@@ -464,12 +520,13 @@ function EpisodeEditor({ projectId, episode, refresh, onDelete }: { projectId: s
     <div className="panel flex min-h-0 flex-col overflow-hidden">
       <div className="flex flex-wrap items-center gap-3 border-b border-[var(--line)] bg-[var(--panel-muted)] px-5 py-3">
         <span className="timecode text-xs text-[var(--muted)]">EP {String(episode.episodeNumber).padStart(2, '0')}</span>
-        <input className="field !min-w-48 flex-1 !bg-white !py-2 font-semibold" value={title} onChange={e => setTitle(e.target.value)} />
-        <button className="btn-secondary" disabled={saving} onClick={() => void save()}><Save className="h-3.5 w-3.5" /> 保存</button>
+        <input className="field !min-w-48 flex-1 !bg-white !py-2 font-semibold read-only:cursor-not-allowed read-only:opacity-70" value={title} onChange={e => setTitle(e.target.value)} readOnly={locked} />
+        <button className="btn-secondary" disabled={saving || locked} onClick={() => void save()} title={locked ? '取消定稿后才能编辑' : undefined}><Save className="h-3.5 w-3.5" /> 保存</button>
         <button className={episode.status === 'confirmed' ? 'btn-secondary' : 'btn-primary'} disabled={saving} onClick={() => void save(episode.status === 'confirmed' ? 'draft' : 'confirmed')}><Check className="h-3.5 w-3.5" />{episode.status === 'confirmed' ? '取消定稿' : '定稿'}</button>
         <button className="btn-danger !px-2.5" onClick={onDelete} aria-label="删除分集"><Trash2 className="h-4 w-4" /></button>
       </div>
-      <textarea className="min-h-[500px] flex-1 resize-y border-0 bg-white p-5 font-mono text-sm leading-7 outline-none lg:resize-none" value={content} onChange={e => setContent(e.target.value)} placeholder="写下本集场景、动作与对白…" />
+      {locked && <div className="border-b border-[var(--line)] bg-emerald-50 px-5 py-2 text-xs text-emerald-700">本集已定稿。需要修改时请先取消定稿；已有分镜或剪辑内容时将保持锁定，避免下游画面与剧本失配。</div>}
+      <textarea className="min-h-[500px] flex-1 resize-y border-0 bg-white p-5 font-mono text-sm leading-7 outline-none read-only:cursor-not-allowed read-only:bg-slate-50 lg:resize-none" value={content} onChange={e => setContent(e.target.value)} placeholder="写下本集场景、动作与对白…" readOnly={locked} />
     </div>
   )
 }

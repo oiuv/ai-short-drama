@@ -143,6 +143,23 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
     }
   }
 
+  const deleteVersion = async (entity: Entity, imageId: string) => {
+    if (!await confirmToast({
+      title: '删除这个图片版本？',
+      description: '该版本记录和本地图片文件都会被删除；若它是当前版本，将自动切换到最近版本。',
+      confirmLabel: '删除版本',
+    })) return
+    try {
+      await requestJson(`/api/entities/${entity.id}/image`, {
+        method: 'POST', body: JSON.stringify({ action: 'delete', imageId }),
+      })
+      await refresh(true)
+      toast.success('图片版本已删除')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除图片版本失败')
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1500px] space-y-5">
       <section className="panel flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between md:p-6">
@@ -175,6 +192,7 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
               onGenerate={generate}
               onUpload={upload}
               onSelect={selectVersion}
+              onDeleteVersion={deleteVersion}
               onUpdate={update}
               onDelete={remove}
             />
@@ -201,13 +219,14 @@ export function EntityStep({ kind, bundle, refresh }: Props) {
   )
 }
 
-function EntityCard({ entity, accent, working, onGenerate, onUpload, onSelect, onUpdate, onDelete }: {
+function EntityCard({ entity, accent, working, onGenerate, onUpload, onSelect, onDeleteVersion, onUpdate, onDelete }: {
   entity: Entity
   accent: string
   working: boolean
   onGenerate: (entity: Entity, referenceCurrent?: boolean) => Promise<void>
   onUpload: (entity: Entity, file: File) => Promise<void>
   onSelect: (entity: Entity, imageId: string) => Promise<void>
+  onDeleteVersion: (entity: Entity, imageId: string) => Promise<void>
   onUpdate: (entity: Entity, fields: Partial<Entity>) => Promise<void>
   onDelete: (entity: Entity) => Promise<void>
 }) {
@@ -228,7 +247,7 @@ function EntityCard({ entity, accent, working, onGenerate, onUpload, onSelect, o
           <button className="btn-quiet !min-h-7 !px-1.5 hover:!text-[var(--danger)]" onClick={() => void onDelete(entity)}><Trash2 className="h-3.5 w-3.5" /></button>
         </div>
         <textarea className="mt-3 min-h-24 w-full resize-y rounded-lg border border-transparent bg-[var(--panel-muted)] p-2.5 text-xs leading-5 outline-none focus:border-[var(--projector)]" defaultValue={entity.description} onBlur={e => { if (e.target.value !== entity.description) void onUpdate(entity, { description: e.target.value }) }} />
-        {entity.images.length > 0 && <div className="scrollbar-thin mt-3 flex gap-2 overflow-x-auto pb-1">{entity.images.map((image, index) => <button key={image.id} onClick={() => void onSelect(entity, image.id)} className={`relative h-12 w-12 shrink-0 overflow-hidden rounded-lg border-2 ${image.id === entity.selectedImage?.id ? 'border-[var(--projector)]' : 'border-transparent opacity-65 hover:opacity-100'}`}><img src={image.url} alt={`版本 ${index + 1}`} className="h-full w-full object-cover" /></button>)}</div>}
+        {entity.images.length > 0 && <div className="scrollbar-thin mt-3 flex gap-2 overflow-x-auto pb-1">{entity.images.map((image, index) => <div key={image.id} className="relative h-12 w-12 shrink-0"><button onClick={() => void onSelect(entity, image.id)} className={`h-full w-full overflow-hidden rounded-lg border-2 ${image.id === entity.selectedImage?.id ? 'border-[var(--projector)]' : 'border-transparent opacity-65 hover:opacity-100'}`}><img src={image.url} alt={`版本 ${index + 1}`} className="h-full w-full object-cover" /></button><button className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[10px] text-white shadow" onClick={() => void onDeleteVersion(entity, image.id)} aria-label={`删除图片版本 ${index + 1}`}>×</button></div>)}</div>}
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button className="btn-primary" disabled={working} onClick={() => void onGenerate(entity, false)}><Sparkles className="h-3.5 w-3.5" /> {entity.selectedImage ? '生成新版本' : '生成图片'}</button>
           <button className="btn-secondary" disabled={working || !entity.selectedImage} onClick={() => void onGenerate(entity, true)}><RefreshCw className="h-3.5 w-3.5" /> 参考重绘</button>

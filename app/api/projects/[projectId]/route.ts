@@ -28,6 +28,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
   try {
     const { projectId } = await params
     const body = updateSchema.parse(await request.json())
+    const bundle = getProjectBundle(projectId)
+    if (!bundle) return fail('项目不存在', 404)
+    const maxEpisodeNumber = Math.max(0, ...bundle.episodes.map(episode => episode.episodeNumber))
+    if (body.plannedEpisodes !== undefined && body.plannedEpisodes !== null && body.plannedEpisodes < maxEpisodeNumber) {
+      return fail(`计划总集数不能小于当前已存在的第 ${maxEpisodeNumber} 集`, 400)
+    }
     const project = updateProject(projectId, body)
     return project ? ok(project) : fail('项目不存在', 404)
   } catch (error) {

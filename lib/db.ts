@@ -117,6 +117,9 @@ function initialize(db: Database.Database): void {
       model TEXT NOT NULL,
       duration REAL NOT NULL DEFAULT 0,
       resolution TEXT NOT NULL DEFAULT '',
+      prompt TEXT NOT NULL DEFAULT '',
+      rating INTEGER CHECK(rating IS NULL OR (rating >= 1 AND rating <= 5)),
+      note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL
     );
 
@@ -199,6 +202,9 @@ function videoFromRow(row: SqlRow): VideoVersion {
     model: String(row.model),
     duration: Number(row.duration ?? 0),
     resolution: String(row.resolution ?? ''),
+    prompt: String(row.prompt ?? ''),
+    rating: row.rating === null || row.rating === undefined ? null : Number(row.rating),
+    note: String(row.note ?? ''),
     createdAt: String(row.created_at),
     url: mediaUrl(videoPath),
   }
@@ -725,6 +731,43 @@ export function selectEntityImage(entityId: string, imageId: string): Entity | n
   return getEntity(entityId)
 }
 
+export function confirmAllDraftEpisodes(projectId: string): ProjectBundle {
+  const db = getDb()
+  const confirm = db.transaction(() => {
+    const empty = db.prepare(`
+      SELECT episode_number FROM episodes WHERE project_id = ? AND status = 'draft' AND TRIM(content) = ''
+      ORDER BY episode_number LIMIT 1
+    `).get(projectId) as SqlRow | undefined
+    if (empty) throw new Error(`第 ${Number(empty.episode_number)} 集内容为空，不能批量定稿`)
+    db.prepare(`UPDATE episodes SET status = 'confirmed', updated_at = ? WHERE project_id = ? AND status = 'draft'`)
+      .run(now(), projectId)
+  })
+  confirm()
+  return getProjectBundle(projectId)!
+}
+
+export function deleteEntityImage(entityId: string, imageId: string): { entity: Entity; path: string } | null {
+  const db = getDb()
+  const image = db.prepare('SELECT path FROM entity_images WHERE id = ? AND entity_id = ?')
+    .get(imageId, entityId) as SqlRow | undefined
+  if (!image) return null
+  const transaction = db.transaction(() => {
+    db.prepare('DELETE FROM entity_images WHERE id = ?').run(imageId)
+    const entity = db.prepare('SELECT selected_image_id FROM entities WHERE id = ?').get(entityId) as SqlRow
+    if (String(entity.selected_image_id ?? '') === imageId) {
+      const replacement = db.prepare(`
+        SELECT id FROM entity_images WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1
+      `).get(entityId) as SqlRow | undefined
+      db.prepare('UPDATE entities SET selected_image_id = ?, updated_at = ? WHERE id = ?')
+        .run(replacement ? String(replacement.id) : null, now(), entityId)
+    } else {
+      db.prepare('UPDATE entities SET updated_at = ? WHERE id = ?').run(now(), entityId)
+    }
+  })
+  transaction()
+  return { entity: getEntity(entityId)!, path: String(image.path) }
+}
+
 export function replaceStoryboard(projectId: string, episodeId: string, shots: Array<{
   shotOrder: number
   prompt: string
@@ -815,9 +858,9 @@ export function markShotGenerating(shotId: string, taskId: string, model: string
   const timestamp = now()
   const transaction = db.transaction(() => {
     db.prepare(`
-      INSERT INTO shot_videos (id, shot_id, path, provider_task_id, model, duration, resolution, created_at)
-      VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
-    `).run(versionId, shotId, taskId, model, shot.duration, resolution, timestamp)
+      INSERT INTO shot_videos (id, shot_id, path, provider_task_id, model, duration, resolution, prompt, created_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+    `).run(versionId, shotId, taskId, model, shot.duration, resolution, shot.prompt, timestamp)
     db.prepare(`
       UPDATE shots SET status = 'generating', provider_task_id = ?, error = NULL, updated_at = ? WHERE id = ?
     `).run(taskId, timestamp, shotId)
@@ -852,9 +895,9 @@ export function addShotVideo(shotId: string, input: {
       `).run(input.path, input.model, input.duration, input.resolution, id)
     } else {
       db.prepare(`
-        INSERT INTO shot_videos (id, shot_id, path, provider_task_id, model, duration, resolution, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, shotId, input.path, input.providerTaskId, input.model, input.duration, input.resolution, timestamp)
+        INSERT INTO shot_videos (id, shot_id, path, provider_task_id, model, duration, resolution, prompt, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, shotId, input.path, input.providerTaskId, input.model, input.duration, input.resolution, getShot(shotId)?.prompt ?? '', timestamp)
     }
     db.prepare(`
       UPDATE shots SET status = 'success', selected_video_id = ?, provider_task_id = ?, error = NULL, updated_at = ?
@@ -863,6 +906,53 @@ export function addShotVideo(shotId: string, input: {
   })
   transaction()
   return getShot(shotId)!
+}
+
+export function updateShotVideo(shotId: string, videoId: string, fields: { rating?: number | null; note?: string }): Shot | null {
+  const db = getDb()
+  const current = db.prepare('SELECT id, rating, note FROM shot_videos WHERE id = ? AND shot_id = ? AND path IS NOT NULL')
+    .get(videoId, shotId) as SqlRow | undefined
+  if (!current) return null
+  const transaction = db.transaction(() => {
+    const timestamp = now()
+    db.prepare('UPDATE shot_videos SET rating = ?, note = ? WHERE id = ?').run(
+      fields.rating === undefined ? current.rating : fields.rating,
+      fields.note === undefined ? current.note : fields.note,
+      videoId,
+    )
+    db.prepare('UPDATE shots SET updated_at = ? WHERE id = ?').run(timestamp, shotId)
+  })
+  transaction()
+  return getShot(shotId)
+}
+
+export function deleteShotVideo(shotId: string, videoId: string): { shot: Shot; path: string } | null {
+  const db = getDb()
+  const current = db.prepare('SELECT path FROM shot_videos WHERE id = ? AND shot_id = ? AND path IS NOT NULL')
+    .get(videoId, shotId) as SqlRow | undefined
+  if (!current) return null
+  const transaction = db.transaction(() => {
+    db.prepare('DELETE FROM shot_videos WHERE id = ?').run(videoId)
+    const replacement = db.prepare(`
+      SELECT id FROM shot_videos WHERE shot_id = ? AND path IS NOT NULL ORDER BY created_at DESC LIMIT 1
+    `).get(shotId) as SqlRow | undefined
+    const shot = db.prepare('SELECT status, selected_video_id FROM shots WHERE id = ?').get(shotId) as SqlRow
+    const selectedVideoId = shot.selected_video_id ? String(shot.selected_video_id) : null
+    if (selectedVideoId === videoId) {
+      db.prepare(`
+        UPDATE shots SET selected_video_id = ?, status = ?, updated_at = ? WHERE id = ?
+      `).run(
+        replacement ? String(replacement.id) : null,
+        String(shot.status) === 'generating' ? 'generating' : replacement ? 'success' : 'pending',
+        now(),
+        shotId,
+      )
+    } else {
+      db.prepare('UPDATE shots SET updated_at = ? WHERE id = ?').run(now(), shotId)
+    }
+  })
+  transaction()
+  return { shot: getShot(shotId)!, path: String(current.path) }
 }
 
 export function saveEditDraft(projectId: string, episodeId: string, clips: EditClip[]): EditDraft {

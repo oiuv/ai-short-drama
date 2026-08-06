@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Clapperboard, Loader2, Plus, Save, Sparkles, Trash2, Video } from 'lucide-react'
 import { toast } from 'sonner'
 import { confirmToast } from '@/components/confirm-toast'
@@ -14,16 +14,19 @@ interface Props {
 }
 
 export function StoryboardStep({ bundle, refresh }: Props) {
-  const [episodeId, setEpisodeId] = useState(bundle.episodes[0]?.id ?? '')
+  const confirmedEpisodes = useMemo(() => bundle.episodes.filter(episode => episode.status === 'confirmed'), [bundle.episodes])
+  const [episodeId, setEpisodeId] = useState(confirmedEpisodes[0]?.id ?? '')
   const [model, setModel] = useState<string>(SEEDANCE_MODELS[0].id)
   const selectedModel = SEEDANCE_MODELS.find(item => item.id === model) ?? SEEDANCE_MODELS[0]
   const [resolution, setResolution] = useState<string>('720p')
   const [splitting, setSplitting] = useState(false)
   const [batching, setBatching] = useState(false)
+  const [selectedShotIds, setSelectedShotIds] = useState<Set<string>>(() => new Set())
+  const [dirtyShotIds, setDirtyShotIds] = useState<Set<string>>(() => new Set())
 
   useEffect(() => {
-    if (episodeId && !bundle.episodes.some(episode => episode.id === episodeId)) setEpisodeId(bundle.episodes[0]?.id ?? '')
-  }, [bundle.episodes, episodeId])
+    if (!confirmedEpisodes.some(episode => episode.id === episodeId)) setEpisodeId(confirmedEpisodes[0]?.id ?? '')
+  }, [confirmedEpisodes, episodeId])
   useEffect(() => {
     if (!selectedModel.resolutions.includes(resolution as never)) setResolution(selectedModel.resolutions[0])
   }, [selectedModel, resolution])
@@ -34,6 +37,21 @@ export function StoryboardStep({ bundle, refresh }: Props) {
     entity.selectedImage && (!episode || entity.episodes.length === 0 || entity.episodes.includes(episode.episodeNumber))
   )), [bundle.entities, episode])
   const generatingIds = bundle.shots.filter(shot => shot.status === 'generating').map(shot => shot.id).join(',')
+
+  useEffect(() => {
+    const currentIds = new Set(shots.map(shot => shot.id))
+    setSelectedShotIds(current => new Set([...current].filter(id => currentIds.has(id))))
+    setDirtyShotIds(current => new Set([...current].filter(id => currentIds.has(id))))
+  }, [shots])
+
+  const handleDirtyChange = useCallback((shotId: string, dirty: boolean) => {
+    setDirtyShotIds(current => {
+      const next = new Set(current)
+      if (dirty) next.add(shotId)
+      else next.delete(shotId)
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     if (!generatingIds) return
@@ -92,7 +110,7 @@ export function StoryboardStep({ bundle, refresh }: Props) {
       await requestJson<Shot>(`/api/shots/${shotId}/video`, {
         method: 'POST', body: JSON.stringify({ model, resolution }),
       })
-      await refresh(true)
+      if (!silent) await refresh(true)
       if (!silent) toast.success('Seedance 任务已提交')
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : '提交失败')
@@ -101,8 +119,11 @@ export function StoryboardStep({ bundle, refresh }: Props) {
   }
 
   const batchGenerate = async () => {
-    const pending = shots.filter(shot => shot.status !== 'generating' && shot.prompt.trim())
-    if (!pending.length) return toast.info('没有可提交的分镜')
+    const selected = shots.filter(shot => selectedShotIds.has(shot.id))
+    if (!selected.length) return toast.info('请先勾选要批量生成的镜头')
+    if (selected.some(shot => dirtyShotIds.has(shot.id))) return toast.error('选中的镜头有未保存修改，请先保存后再批量生成')
+    const pending = selected.filter(shot => shot.status !== 'generating' && shot.prompt.trim())
+    if (!pending.length) return toast.info('选中的镜头没有可提交任务')
     if (!await confirmToast({
       title: `提交 ${pending.length} 个视频任务？`,
       description: 'Seedance 任务将按每组 2 个控制并发，提交后可在分镜列表查看进度。',
@@ -131,23 +152,27 @@ export function StoryboardStep({ bundle, refresh }: Props) {
             <p className="mt-1 text-sm text-[var(--muted)]">DeepSeek 加载 drama-shot-prompt Skill 拆镜，Seedance 2.0 使用选定角色、场景和道具的本地图片 Base64 作为参考。</p>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[180px_230px_120px_auto_auto]">
-            <label><span className="label">分集</span><select className="field" value={episodeId} onChange={e => setEpisodeId(e.target.value)}>{bundle.episodes.map(item => <option key={item.id} value={item.id}>第{item.episodeNumber}集 · {item.title}</option>)}</select></label>
+            <label><span className="label">已定稿分集</span><select className="field" value={episodeId} onChange={e => { setEpisodeId(e.target.value); setSelectedShotIds(new Set()) }}>{confirmedEpisodes.map(item => <option key={item.id} value={item.id}>第{item.episodeNumber}集 · {item.title}</option>)}</select></label>
             <label><span className="label">视频模型</span><select className="field" value={model} onChange={e => setModel(e.target.value)}>{SEEDANCE_MODELS.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
             <label><span className="label">分辨率</span><select className="field" value={resolution} onChange={e => setResolution(e.target.value)}>{selectedModel.resolutions.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
             <button className="btn-secondary self-end" disabled={!episode || splitting} onClick={() => void split()}>{splitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{shots.length ? '重新拆分' : 'AI 拆分'}</button>
-            <button className="btn-primary self-end" disabled={!shots.length || batching} onClick={() => void batchGenerate()}>{batching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}批量生成</button>
+            <button className="btn-primary self-end" disabled={!selectedShotIds.size || batching} onClick={() => void batchGenerate()}>{batching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}批量生成{selectedShotIds.size ? ` (${selectedShotIds.size})` : ''}</button>
           </div>
         </div>
       </section>
 
       {!episode ? (
-        <div className="panel py-24 text-center text-sm text-[var(--muted)]">请先在剧本步骤创建分集。</div>
+        <div className="panel py-24 text-center text-sm text-[var(--muted)]">请先在剧本步骤创建并定稿分集。</div>
       ) : shots.length === 0 ? (
         <div className="panel flex flex-col items-center border-dashed py-24 text-center"><Clapperboard className="mb-4 h-10 w-10 text-[var(--projector)]" /><strong className="text-lg">本集还没有分镜</strong><p className="mt-2 text-sm text-[var(--muted)]">确认剧本和素材后，让 DeepSeek 拆成可生成的视频镜头。</p><button className="btn-primary mt-5" disabled={splitting} onClick={() => void split()}><Sparkles className="h-4 w-4" /> AI 拆分本集</button></div>
       ) : (
         <div className="space-y-4">
+          <div className="panel-muted flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-xs text-[var(--muted)]">
+            <span>勾选需要一起提交的镜头；有未保存修改时会阻止批量生成。</span>
+            <button className="btn-secondary !min-h-8 !py-1.5" onClick={() => setSelectedShotIds(current => current.size === shots.length ? new Set() : new Set(shots.map(shot => shot.id)))}>{selectedShotIds.size === shots.length ? '清空选择' : '全选本集'}</button>
+          </div>
           {shots.map(shot => (
-            <ShotCard key={shot.id + shot.updatedAt} shot={shot} entities={availableEntities} model={model} resolution={resolution} refresh={refresh} onGenerate={generateVideo} />
+            <ShotCard key={shot.id + shot.updatedAt} shot={shot} entities={availableEntities} selected={selectedShotIds.has(shot.id)} onToggleSelected={() => setSelectedShotIds(current => { const next = new Set(current); if (next.has(shot.id)) next.delete(shot.id); else next.add(shot.id); return next })} onDirtyChange={handleDirtyChange} refresh={refresh} onGenerate={generateVideo} />
           ))}
           <button className="panel flex w-full items-center justify-center border-dashed py-5 text-sm font-semibold text-[var(--muted)] hover:border-[var(--projector)] hover:text-[var(--ink)]" onClick={() => void add()}><Plus className="mr-2 h-4 w-4" /> 手动追加镜头</button>
         </div>
@@ -156,11 +181,12 @@ export function StoryboardStep({ bundle, refresh }: Props) {
   )
 }
 
-function ShotCard({ shot, entities, refresh, onGenerate }: {
+function ShotCard({ shot, entities, selected, onToggleSelected, onDirtyChange, refresh, onGenerate }: {
   shot: Shot
   entities: Entity[]
-  model: string
-  resolution: string
+  selected: boolean
+  onToggleSelected: () => void
+  onDirtyChange: (shotId: string, dirty: boolean) => void
   refresh: (quiet?: boolean) => Promise<void>
   onGenerate: (shotId: string) => Promise<void>
 }) {
@@ -170,6 +196,11 @@ function ShotCard({ shot, entities, refresh, onGenerate }: {
   const [saving, setSaving] = useState(false)
   const [generating, setGenerating] = useState(false)
   const dirty = prompt !== shot.prompt || duration !== shot.duration || JSON.stringify(referenceIds) !== JSON.stringify(shot.referenceEntityIds)
+
+  useEffect(() => {
+    onDirtyChange(shot.id, dirty)
+    return () => onDirtyChange(shot.id, false)
+  }, [dirty, onDirtyChange, shot.id])
 
   const save = async (quiet = false) => {
     setSaving(true)
@@ -210,17 +241,50 @@ function ShotCard({ shot, entities, refresh, onGenerate }: {
   }
 
   const selectVideo = async (videoId: string) => {
-    await requestJson(`/api/shots/${shot.id}`, { method: 'PATCH', body: JSON.stringify({ selectedVideoId: videoId }) })
-    await refresh(true)
+    try {
+      await requestJson(`/api/shots/${shot.id}`, { method: 'PATCH', body: JSON.stringify({ selectedVideoId: videoId }) })
+      await refresh(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '切换视频版本失败')
+    }
+  }
+
+  const updateVideo = async (videoId: string, fields: { rating?: number | null; note?: string }) => {
+    try {
+      await requestJson(`/api/shots/${shot.id}/videos/${videoId}`, {
+        method: 'PATCH', body: JSON.stringify(fields),
+      })
+      await refresh(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '更新视频版本失败')
+    }
+  }
+
+  const removeVideo = async (videoId: string) => {
+    if (!await confirmToast({
+      title: '删除这个视频版本？',
+      description: '该版本记录和本地视频文件都会被删除；若它是当前版本，将自动切换到最近版本。',
+      confirmLabel: '删除版本',
+    })) return
+    try {
+      await requestJson(`/api/shots/${shot.id}/videos/${videoId}`, { method: 'DELETE' })
+      await refresh(true)
+      toast.success('视频版本已删除')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '删除视频版本失败')
+    }
   }
 
   const statusStyle = shot.status === 'success' ? 'bg-emerald-100 text-emerald-700' : shot.status === 'generating' ? 'bg-blue-100 text-blue-700' : shot.status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'
+  const completeVideos = shot.videos.filter(video => video.path)
+  const activeVideo = shot.selectedVideo?.path ? shot.selectedVideo : completeVideos[0] ?? null
 
   return (
     <article className="panel overflow-hidden">
       <div className="grid xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="p-5">
           <div className="flex flex-wrap items-center gap-3">
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold"><input type="checkbox" checked={selected} onChange={onToggleSelected} /> 批量选择</label>
             <span className="timecode rounded-md bg-[var(--navy)] px-2.5 py-1 text-xs text-white">SHOT {String(shot.shotOrder).padStart(2, '0')}</span>
             <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${statusStyle}`}>{shot.status === 'success' ? '已完成' : shot.status === 'generating' ? '生成中' : shot.status === 'failed' ? '失败' : '待生成'}</span>
             <label className="ml-auto flex items-center gap-2 text-xs text-[var(--muted)]">时长 <input type="number" min={4} max={15} className="field !w-20 !py-1.5" value={duration} onChange={e => setDuration(Math.max(4, Math.min(15, Number(e.target.value) || 4)))} /> 秒</label>
@@ -244,11 +308,24 @@ function ShotCard({ shot, entities, refresh, onGenerate }: {
           </div>
         </div>
         <div className="border-t border-[var(--line)] bg-[var(--navy)] p-4 text-white xl:border-l xl:border-t-0">
-          <div className="timecode mb-3 flex items-center justify-between text-[10px] text-white/45"><span>VIDEO TAKE</span><span>{shot.videos.filter(video => video.path).length} VERSIONS</span></div>
+          <div className="timecode mb-3 flex items-center justify-between text-[10px] text-white/45"><span>VIDEO TAKE</span><span>{completeVideos.length} VERSIONS</span></div>
           <div className="flex aspect-video items-center justify-center overflow-hidden rounded-xl bg-black/45">
             {shot.selectedVideo?.url ? <video key={shot.selectedVideo.url} src={shot.selectedVideo.url} controls preload="metadata" className="h-full w-full object-contain" /> : shot.status === 'generating' ? <div className="text-center text-xs text-white/60"><Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-[var(--projector)]" />Seedance 正在制作</div> : <Video className="h-10 w-10 text-white/15" />}
           </div>
-          {shot.videos.filter(video => video.path).length > 1 && <div className="mt-3 flex gap-2 overflow-x-auto">{shot.videos.filter(video => video.path).map((video, index) => <button key={video.id} onClick={() => void selectVideo(video.id)} className={`timecode rounded-lg border px-3 py-2 text-[10px] ${video.id === shot.selectedVideo?.id ? 'border-[var(--projector)] bg-[var(--projector)]/10 text-[var(--projector)]' : 'border-white/10 text-white/50'}`}>TAKE {String(index + 1).padStart(2, '0')}</button>)}</div>}
+          {completeVideos.length > 0 && <div className="mt-3 flex gap-2 overflow-x-auto">{completeVideos.map((video, index) => <button key={video.id} onClick={() => void selectVideo(video.id)} className={`timecode rounded-lg border px-3 py-2 text-[10px] ${video.id === activeVideo?.id ? 'border-[var(--projector)] bg-[var(--projector)]/10 text-[var(--projector)]' : 'border-white/10 text-white/50'}`}>TAKE {String(index + 1).padStart(2, '0')}</button>)}</div>}
+          {activeVideo && (
+            <div className="mt-3 space-y-3 rounded-xl border border-white/10 bg-white/[.04] p-3 text-xs text-white/65">
+              <div className="flex items-start justify-between gap-3">
+                <div><strong className="block text-white">{SEEDANCE_MODELS.find(item => item.id === activeVideo.model)?.name || activeVideo.model}</strong><span>{activeVideo.resolution} · {activeVideo.duration.toFixed(1)} 秒 · {new Date(activeVideo.createdAt).toLocaleString('zh-CN')}</span></div>
+                <button className="btn-quiet !min-h-7 !px-1.5 !text-white/50 hover:!text-red-300" disabled={shot.status === 'generating'} onClick={() => void removeVideo(activeVideo.id)} title="删除当前视频版本"><Trash2 className="h-3.5 w-3.5" /></button>
+              </div>
+              <div className="flex items-center gap-1" aria-label="视频版本评分">
+                {[1, 2, 3, 4, 5].map(star => <button key={star} className={`text-base ${(activeVideo.rating ?? 0) >= star ? 'text-amber-300' : 'text-white/20'} hover:text-amber-200`} onClick={() => void updateVideo(activeVideo.id, { rating: activeVideo.rating === star ? null : star })} aria-label={`${star} 星`}>★</button>)}
+              </div>
+              <input className="w-full rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs text-white placeholder:text-white/30 focus:border-[var(--projector)] focus:outline-none" defaultValue={activeVideo.note} maxLength={200} placeholder="给这个版本添加备注…" onBlur={event => { const note = event.target.value.trim(); if (note !== activeVideo.note) void updateVideo(activeVideo.id, { note }) }} />
+              <details><summary className="cursor-pointer text-white/55 hover:text-white">查看生成提示词快照</summary><p className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap leading-5 text-white/55">{activeVideo.prompt || '该版本没有提示词快照'}</p></details>
+            </div>
+          )}
         </div>
       </div>
     </article>

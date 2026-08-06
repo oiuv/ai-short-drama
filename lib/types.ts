@@ -72,6 +72,9 @@ export interface VideoVersion {
   model: string
   duration: number
   resolution: string
+  prompt: string
+  rating: number | null
+  note: string
   createdAt: string
   url: string | null
 }
