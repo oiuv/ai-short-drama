@@ -71,8 +71,10 @@ export async function loadSkill(name: string): Promise<StandardSkill> {
 
 export async function loadSkillPrompt(name: string): Promise<string> {
   const skill = await loadSkill(name)
+  if (skill.references.length === 0) return skill.instructions
+
   const referenceText = skill.references.map(reference => (
-    `\n\n---\n\n# 参考资料：${reference.path}\n\n${reference.content}`
-  )).join('')
-  return `${skill.instructions}${referenceText}`
+    `# 参考资料：${reference.path}\n\n${reference.content}`
+  )).join('\n\n---\n\n')
+  return `${referenceText}\n\n---\n\n# Skill 正文（优先级高于以上参考资料）\n\n${skill.instructions}`
 }

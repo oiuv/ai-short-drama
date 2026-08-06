@@ -207,6 +207,8 @@ description: 爽剧短剧剧本创作技能。基于专业爽点模型，把一�
 
 只输出合法 JSON，不加 Markdown 代码围栏、前言、解释或结语。若调用方给出更严格的 JSON Schema，以调用方 Schema 为准，但不得丢失剧本、角色、空镜场景、道具四类核心产物。
 
+根对象固定且必须同时包含 `summary`、`episodes`、`characters`、`scenes`、`props` 五个同级字段。`summary` 只保存概要字段；严禁把 `episodes`、`characters`、`scenes` 或 `props` 放进 `summary`。四个数组字段不得省略，没有对应内容时也必须输出空数组。
+
 ```json
 {
   "summary": {

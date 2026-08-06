@@ -22,6 +22,8 @@ describe('标准影视 Skills', () => {
     const prompt = await loadSkillPrompt('drama-script')
     expect(prompt).toContain('# 参考资料：references/satisfaction-model.md')
     expect(prompt).toContain('爽感 = 消极情绪 × 烈度放大 × 信息差打脸')
+    expect(prompt.indexOf('## 输出契约')).toBeGreaterThan(prompt.lastIndexOf('# 参考资料：'))
+    expect(prompt).toContain('# Skill 正文（优先级高于以上参考资料）')
   })
 
   it('需求优化 Skill 保留用户约束并输出可继续创作的结构', async () => {

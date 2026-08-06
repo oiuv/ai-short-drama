@@ -81,10 +81,35 @@ function extractJson(text: string): unknown {
   }
 }
 
+function normalizeGeneratedScriptPayload(value: unknown): unknown {
+  const root = asRecord(value)
+  const summary = asRecord(root?.summary)
+  if (!root || !summary) return value
+
+  const normalizedRoot = { ...root }
+  const normalizedSummary = { ...summary }
+  for (const key of ['episodes', 'characters', 'scenes', 'props'] as const) {
+    if (normalizedRoot[key] === undefined && normalizedSummary[key] !== undefined) {
+      normalizedRoot[key] = normalizedSummary[key]
+      delete normalizedSummary[key]
+    }
+  }
+  normalizedRoot.summary = normalizedSummary
+  return normalizedRoot
+}
+
+function describeZodIssues(error: z.ZodError): string {
+  return error.issues.slice(0, 3).map(issue => {
+    const path = issue.path.length ? issue.path.join('.') : 'root'
+    return `${path}: ${issue.message}`
+  }).join('；')
+}
+
 async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
   systemPrompt: string,
   userPrompt: string,
   schema: Schema,
+  normalize?: (value: unknown) => unknown,
 ): Promise<z.output<Schema>> {
   const apiKey = process.env.DEEPSEEK_API_KEY
   if (!apiKey) throw new Error('未配置 DEEPSEEK_API_KEY')
@@ -193,11 +218,11 @@ async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
       )
     }
     try {
-      return schema.parse(extracted)
+      return schema.parse(normalize ? normalize(extracted) : extracted)
     } catch (error) {
       if (!(error instanceof z.ZodError)) throw error
       throw createDeepSeekError(
-        `DeepSeek 返回结构不符合要求：${error.issues[0]?.message || '结构错误'}`,
+        `DeepSeek 返回结构不符合要求：${describeZodIssues(error) || '结构错误'}`,
         diagnosticBase,
         'schema_validation',
         metadata,
@@ -596,7 +621,7 @@ ${episodeControl}
 ${input.brief}
 ${input.instruction?.trim() ? `\n【本次${mode === 'rewrite' ? '重写' : '续写'}指导】\n${input.instruction.trim()}\n` : ''}
 ${existingScript ? `\n【全部已有剧本内容】\n${existingScript}` : ''}`
-  let generated = await callDeepSeekJson(systemPrompt, userPrompt, generatedScriptSchema)
+  let generated = await callDeepSeekJson(systemPrompt, userPrompt, generatedScriptSchema, normalizeGeneratedScriptPayload)
   if (generated.episodes.length !== input.episodeCount) {
     throw new Error(`Skill 返回 ${generated.episodes.length} 集，要求为 ${input.episodeCount} 集`)
   }
@@ -608,7 +633,7 @@ ${existingScript ? `\n【全部已有剧本内容】\n${existingScript}` : ''}`
 ${sceneIssues.map(issue => `- ${issue}`).join('\n')}
 - 不得只补场号或把同一连续场景拆开凑数；每一场都要有真实的地点/时间切换和完整戏剧作用。
 - 重新输出完整 JSON，不要解释修改过程。`
-    generated = await callDeepSeekJson(systemPrompt, correctionPrompt, generatedScriptSchema)
+    generated = await callDeepSeekJson(systemPrompt, correctionPrompt, generatedScriptSchema, normalizeGeneratedScriptPayload)
     if (generated.episodes.length !== input.episodeCount) {
       throw new Error(`Skill 纠正后返回 ${generated.episodes.length} 集，要求为 ${input.episodeCount} 集`)
     }

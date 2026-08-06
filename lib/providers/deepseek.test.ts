@@ -80,6 +80,7 @@ describe('DeepSeek provider', () => {
     const requestBody = JSON.parse(String(requestInit?.body)) as {
       model: string
       max_tokens: number
+      response_format: { type: string }
       messages: Array<{ role: string; content: string }>
     }
 
@@ -87,11 +88,75 @@ describe('DeepSeek provider', () => {
     expect(requestBody.max_tokens).toBe(DEEPSEEK_MAX_OUTPUT_TOKENS)
     expect(requestBody).toMatchObject({
       thinking: { type: 'enabled' },
+      response_format: { type: 'json_object' },
       stream: true,
       stream_options: { include_usage: true },
     })
     expect(requestBody.messages[1]?.content).toContain('雨夜证词')
     expect(result.brief).toBe(optimizedBrief)
+  })
+
+  it('纠正模型把顶层数组误放进 summary 的合法 JSON', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            summary: {
+              title: '雨夜证词',
+              synopsis: '林夏追查真相。',
+              genre: '悬疑复仇',
+              episodes: [{ episodeNumber: 1, title: '追查', content: episodeContent('旧仓库') }],
+              characters: [],
+              scenes: [],
+              props: [],
+            },
+          }),
+        },
+      }],
+    }), { status: 200 }))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await generateScript({
+      title: '雨夜证词',
+      brief: '女记者追查好友失踪案。',
+      genre: '悬疑复仇',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      episodeCount: 1,
+      plannedEpisodes: 10,
+    })
+
+    expect(result.episodes).toHaveLength(1)
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: string }>
+    }
+    expect(requestBody.messages[0]?.content).toContain('根对象固定且必须同时包含 `summary`、`episodes`、`characters`、`scenes`、`props` 五个同级字段')
+    expect(requestBody.messages[1]?.content).not.toContain('最终 JSON 根结构硬约束')
+  })
+
+  it('结构校验失败时指出缺失字段路径', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        summary: { title: '雨夜证词', synopsis: '林夏追查真相。', genre: '悬疑复仇' },
+      }) } }],
+    }), { status: 200 })))
+
+    let failure: unknown
+    try {
+      await generateScript({
+        title: '雨夜证词', brief: '女记者追查好友失踪案。', genre: '悬疑复仇',
+        visualStyle: '电影感写实', ratio: '9:16', episodeCount: 1, plannedEpisodes: 10,
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(DiagnosticError)
+    expect((failure as Error).message).toContain('episodes: Required')
+    expect((failure as DiagnosticError).diagnostics).toMatchObject({ phase: 'schema_validation' })
   })
 
   it('可收集参考项目同款 SSE 流式 JSON 响应', async () => {
