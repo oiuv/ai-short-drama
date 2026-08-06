@@ -687,14 +687,22 @@ export async function generateStoryboard(input: {
   episodeContent: string
   visualStyle: string
   ratio: string
-  entities: Array<{ name: string; variant: string; kind: string; description: string }>
+  entities: Array<{
+    name: string
+    variant: string
+    kind: string
+    description: string
+    voiceDescription?: string
+  }>
 }): Promise<GeneratedStoryboard> {
   const systemPrompt = await loadSkillPrompt('drama-shot-prompt')
   const visualStyle = resolveVideoStylePrompt(input.visualStyle)
 
-  const entityText = input.entities.map(entity =>
-    `- [${entity.kind}] ${entity.name}${entity.variant ? ` / ${entity.variant}` : ''}：${entity.description}`
-  ).join('\n')
+  const entityText = input.entities.map(entity => {
+    const voiceDescription = entity.kind === 'character' ? entity.voiceDescription?.trim() : ''
+    const voiceText = voiceDescription ? `；音色描述：${voiceDescription}` : ''
+    return `- [${entity.kind}] ${entity.name}${entity.variant ? ` / ${entity.variant}` : ''}：${entity.description}${voiceText}`
+  }).join('\n')
   const userPrompt = `请使用本 Skill 拆分以下单集剧本。referenceEntityNames 只能逐字使用“可用资产”清单中的名称；角色造型使用“角色名 / 造型名”。输出严格遵循 Skill 的 JSON 契约。
 
 第 ${input.episodeNumber} 集：${input.episodeTitle}

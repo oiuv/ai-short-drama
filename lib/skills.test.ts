@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { loadSkill, loadSkillPrompt } from './skills'
 
-const STANDARD_SKILLS = ['script-brief', 'drama-script', 'drama-cast-scene', 'drama-shot-prompt']
+const STANDARD_SKILLS = ['script-brief', 'drama-script', 'drama-shot-prompt']
 
 describe('标准影视 Skills', () => {
   it.each(STANDARD_SKILLS)('%s 只有标准元数据并可独立加载', async name => {

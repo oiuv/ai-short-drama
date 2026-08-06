@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DiagnosticError } from '../diagnostic-error'
 import { DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MAX_OUTPUT_TOKENS } from '../model-config'
-import { generateScript, optimizeScriptBrief } from './deepseek'
+import { generateScript, generateStoryboard, optimizeScriptBrief } from './deepseek'
 
 function episodeContent(locationPrefix: string, sceneCount = 10): string {
   const times = ['晨', '日', '昏', '夜']
@@ -378,5 +378,55 @@ describe('DeepSeek provider', () => {
     }
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(requestBody.messages[1]?.content).toContain('每集必须为 3 场，这是用户明确要求')
+  })
+
+  it('分镜请求携带角色文字音色描述但不需要音频参考', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            shots: [{
+              shotOrder: 1,
+              prompt: '林夏压低声音说出台词。',
+              duration: 6,
+              referenceEntityNames: ['林夏 / 默认造型', '旧仓库_夜晚'],
+            }],
+          }),
+        },
+      }],
+    }), { status: 200 }))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    await generateStoryboard({
+      episodeNumber: 1,
+      episodeTitle: '追查',
+      episodeContent: '林夏在旧仓库质问证人。',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+      entities: [
+        {
+          name: '林夏',
+          variant: '默认造型',
+          kind: 'character',
+          description: '短发，深色风衣',
+          voiceDescription: '青年女声，音调中低，冷静清晰',
+        },
+        {
+          name: '旧仓库_夜晚',
+          variant: '',
+          kind: 'scene',
+          description: '空旷旧仓库，冷色顶光',
+        },
+      ],
+    })
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ content: string }>
+    }
+    const userPrompt = requestBody.messages[1]?.content ?? ''
+    expect(userPrompt).toContain('林夏 / 默认造型')
+    expect(userPrompt).toContain('音色描述：青年女声，音调中低，冷静清晰')
+    expect(userPrompt).not.toContain('音频参考')
   })
 })

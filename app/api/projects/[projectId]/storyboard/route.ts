@@ -43,6 +43,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         variant: entity.variant,
         kind: entity.kind,
         description: entity.description,
+        voiceDescription: entity.kind === 'character' && typeof entity.metadata.voiceDescription === 'string'
+          ? entity.metadata.voiceDescription.trim()
+          : '',
       })),
     })
     const entityByName = new Map<string, string>()

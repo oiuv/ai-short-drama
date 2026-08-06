@@ -28,10 +28,10 @@ const episode: Episode = {
   createdAt: project.createdAt, updatedAt: project.updatedAt,
 }
 
-function entity(id: string, name: string, episodes: number[]): Entity {
+function entity(id: string, name: string, episodes: number[], voiceDescription = ''): Entity {
   return {
     id, projectId: project.id, kind: 'character', name, variant: '默认造型', description: `${name}的造型`,
-    episodes, category: '', metadata: {}, selectedImageId: null, images: [], selectedImage: null,
+    episodes, category: '', metadata: voiceDescription ? { voiceDescription } : {}, selectedImageId: null, images: [], selectedImage: null,
     createdAt: project.createdAt, updatedAt: project.updatedAt,
   }
 }
@@ -41,7 +41,7 @@ function bundle(status: Episode['status']): ProjectBundle {
     project,
     episodes: [{ ...episode, status }],
     entities: [
-      entity('00000000-0000-4000-8000-000000000011', '林夏', [1]),
+      entity('00000000-0000-4000-8000-000000000011', '林夏', [1], '青年女声，音调中低，冷静清晰'),
       entity('00000000-0000-4000-8000-000000000012', '陆远', [2]),
     ],
     shots: [], edits: [],
@@ -78,7 +78,10 @@ describe('POST /api/projects/[projectId]/storyboard', () => {
 
     expect(response.status).toBe(200)
     expect(mocks.generateStoryboard).toHaveBeenCalledWith(expect.objectContaining({
-      entities: [expect.objectContaining({ name: '林夏' })],
+      entities: [expect.objectContaining({
+        name: '林夏',
+        voiceDescription: '青年女声，音调中低，冷静清晰',
+      })],
     }))
     expect(mocks.replaceStoryboard).toHaveBeenCalledWith(project.id, episode.id, [expect.objectContaining({
       referenceEntityIds: ['00000000-0000-4000-8000-000000000011'],

@@ -45,6 +45,9 @@ Preserve these intentional local-project differences:
 - project state uses local SQLite and media files under ignored `data/`;
 - the default LLM is `deepseek-v4-flash` for all current text/Skill calls, using the configured maximum output limit; do not copy XuefengAI's per-feature model routing;
 - image generation uses Seedream 5.0 Lite, and storyboard video uses the Seedance 2.0 series.
+- `drama-script` produces the episode scripts and their character looks, empty-shot scenes, and props in one generation, and the application stores those assets automatically. Do not add a separate asset-extraction step or a standalone `drama-cast-scene` runtime Skill.
+- character voice consistency is text-only: keep `voiceDescription` and pass it into storyboard prompting, but do not add voice-sample uploads, generated voice samples, or audio-reference binding.
+- editing and final export use the local FFmpeg pipeline. Do not migrate or add XuefengAI's WebGPU editor unless the user explicitly changes this decision.
 
 Use provider documentation under the XuefengAI reference project's `docs/official/` only when it matches the provider and model used here; otherwise consult the current provider's official documentation. Provider changes must include mocked request-contract and response-parser tests for the exact current parameters.
 
