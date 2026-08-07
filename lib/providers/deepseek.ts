@@ -69,6 +69,11 @@ const optimizedScriptBriefSchema = z.object({
   tips: z.array(z.string()).max(5).default([]),
 })
 
+// DeepSeek 官方说明 JSON Output 偶尔会返回空 content；只对可恢复的响应问题限次重试。
+const DEEPSEEK_JSON_MAX_ATTEMPTS = 2
+const DEEPSEEK_JSON_RETRY_INSTRUCTION = `【JSON 输出重试要求】
+上一次调用没有产生可用的正式答案。本次必须完成正式回答，并且只在 content 中输出一个完整 JSON 对象；不要只输出思考过程，不要解释，不要使用 Markdown 代码块。`
+
 function extractJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
   try {
@@ -124,112 +129,139 @@ async function callDeepSeekJson<Schema extends z.ZodTypeAny>(
   const timer = setTimeout(() => controller.abort(), 10 * 60 * 1000)
 
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        response_format: { type: 'json_object' },
-        thinking: { type: 'enabled' },
-        max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-      signal: controller.signal,
-    })
-    const responseMetadata: DeepSeekResponseMetadata = {
-      httpStatus: response.status,
-      contentType: response.headers.get('content-type'),
-      providerRequestId: getProviderRequestId(response),
-    }
-    if (!response.ok) {
-      const raw = await response.text()
-      let providerMessage = ''
-      let errorCode: string | undefined
-      try {
-        const parsed = asRecord(JSON.parse(raw))
-        const providerError = asRecord(parsed?.error)
-        providerMessage = readString(providerError?.message)
-        errorCode = readString(providerError?.code) || undefined
-      } catch {
-        // 非 JSON 错误响应仍由下方安全摘要记录。
+    for (let attempt = 1; attempt <= DEEPSEEK_JSON_MAX_ATTEMPTS; attempt += 1) {
+      const attemptPrompt = attempt === 1
+        ? userPrompt
+        : `${userPrompt}\n\n${DEEPSEEK_JSON_RETRY_INSTRUCTION}`
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: attemptPrompt },
+          ],
+          response_format: { type: 'json_object' },
+          thinking: { type: 'enabled' },
+          max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+        signal: controller.signal,
+      })
+      const responseMetadata: DeepSeekResponseMetadata = {
+        attempt,
+        maxAttempts: DEEPSEEK_JSON_MAX_ATTEMPTS,
+        httpStatus: response.status,
+        contentType: response.headers.get('content-type'),
+        providerRequestId: getProviderRequestId(response),
       }
-      throw createDeepSeekError(
-        `DeepSeek API 错误 (${response.status})${providerMessage ? `：${providerMessage}` : ''}`,
-        diagnosticBase,
-        'http',
-        { ...responseMetadata, rawResponseLength: raw.length, errorCode },
-        raw,
-      )
-    }
+      if (!response.ok) {
+        const raw = await response.text()
+        let providerMessage = ''
+        let errorCode: string | undefined
+        try {
+          const parsed = asRecord(JSON.parse(raw))
+          const providerError = asRecord(parsed?.error)
+          providerMessage = readString(providerError?.message)
+          errorCode = readString(providerError?.code) || undefined
+        } catch {
+          // 非 JSON 错误响应仍由下方安全摘要记录。
+        }
+        throw createDeepSeekError(
+          `DeepSeek API 错误 (${response.status})${providerMessage ? `：${providerMessage}` : ''}`,
+          diagnosticBase,
+          'http',
+          { ...responseMetadata, rawResponseLength: raw.length, errorCode },
+          raw,
+        )
+      }
 
-    let collected: DeepSeekCollectedResponse
-    try {
-      collected = response.headers.get('content-type')?.includes('text/event-stream')
-        ? await collectStreamResponse(response)
-        : collectJsonResponse(await response.text())
-    } catch (error) {
-      throw createDeepSeekError(
-        'DeepSeek 响应无法解析',
-        diagnosticBase,
-        'response_parse',
-        responseMetadata,
-        undefined,
-        error,
-      )
-    }
+      let collected: DeepSeekCollectedResponse
+      try {
+        collected = response.headers.get('content-type')?.includes('text/event-stream')
+          ? await collectStreamResponse(response)
+          : collectJsonResponse(await response.text())
+      } catch (error) {
+        if (attempt < DEEPSEEK_JSON_MAX_ATTEMPTS) {
+          logDeepSeekRetry(diagnosticBase, 'response_parse', responseMetadata)
+          continue
+        }
+        throw createDeepSeekError(
+          'DeepSeek 响应无法解析',
+          diagnosticBase,
+          'response_parse',
+          responseMetadata,
+          undefined,
+          error,
+        )
+      }
 
-    const metadata = { ...responseMetadata, ...collected }
-    if (collected.providerError) {
-      throw createDeepSeekError(
-        collected.providerError.message || 'DeepSeek 调用失败',
-        diagnosticBase,
-        'provider_error',
-        { ...metadata, errorCode: collected.providerError.code },
-      )
-    }
-    if (!collected.content.trim()) {
-      throw createDeepSeekError(
-        'DeepSeek 返回内容为空',
-        diagnosticBase,
-        'empty_content',
-        metadata,
-      )
-    }
+      const metadata = { ...responseMetadata, ...collected }
+      if ((collected.malformedStreamEventCount ?? 0) > 0) {
+        console.warn('[雪风AI短剧工坊][DeepSeek] 已忽略异常 SSE 事件', compactDiagnostics({
+          diagnosticId: diagnosticBase.diagnosticId,
+          provider: 'deepseek',
+          model,
+          attempt,
+          malformedStreamEventCount: collected.malformedStreamEventCount,
+          providerRequestId: metadata.providerRequestId,
+          providerResponseId: metadata.providerResponseId,
+        }))
+      }
+      if (collected.providerError) {
+        throw createDeepSeekError(
+          collected.providerError.message || 'DeepSeek 调用失败',
+          diagnosticBase,
+          'provider_error',
+          { ...metadata, errorCode: collected.providerError.code },
+        )
+      }
+      if (!collected.content.trim()) {
+        if (attempt < DEEPSEEK_JSON_MAX_ATTEMPTS) {
+          logDeepSeekRetry(diagnosticBase, 'empty_content', metadata)
+          continue
+        }
+        throw createDeepSeekError(
+          'DeepSeek 连续两次返回内容为空',
+          diagnosticBase,
+          'empty_content',
+          metadata,
+        )
+      }
 
-    let extracted: unknown
-    try {
-      extracted = extractJson(collected.content)
-    } catch (error) {
-      throw createDeepSeekError(
-        'DeepSeek 未返回有效 JSON',
-        diagnosticBase,
-        'json_parse',
-        metadata,
-        collected.content,
-        error,
-      )
+      let extracted: unknown
+      try {
+        extracted = extractJson(collected.content)
+      } catch (error) {
+        throw createDeepSeekError(
+          'DeepSeek 未返回有效 JSON',
+          diagnosticBase,
+          'json_parse',
+          metadata,
+          collected.content,
+          error,
+        )
+      }
+      try {
+        return schema.parse(normalize ? normalize(extracted) : extracted)
+      } catch (error) {
+        if (!(error instanceof z.ZodError)) throw error
+        throw createDeepSeekError(
+          `DeepSeek 返回结构不符合要求：${describeZodIssues(error) || '结构错误'}`,
+          diagnosticBase,
+          'schema_validation',
+          metadata,
+          collected.content,
+          error,
+        )
+      }
     }
-    try {
-      return schema.parse(normalize ? normalize(extracted) : extracted)
-    } catch (error) {
-      if (!(error instanceof z.ZodError)) throw error
-      throw createDeepSeekError(
-        `DeepSeek 返回结构不符合要求：${describeZodIssues(error) || '结构错误'}`,
-        diagnosticBase,
-        'schema_validation',
-        metadata,
-        collected.content,
-        error,
-      )
-    }
+    throw new Error('DeepSeek JSON 重试状态异常')
   } catch (error) {
     if (error instanceof DiagnosticError) throw error
     if (error instanceof Error && error.name === 'AbortError') {
@@ -303,6 +335,8 @@ interface DeepSeekDiagnosticBase {
 }
 
 interface DeepSeekResponseMetadata {
+  attempt?: number
+  maxAttempts?: number
   httpStatus?: number
   contentType?: string | null
   providerRequestId?: string
@@ -313,6 +347,7 @@ interface DeepSeekResponseMetadata {
   finishReason?: string | null
   contentLength?: number
   reasoningContentLength?: number
+  malformedStreamEventCount?: number
   errorCode?: string
 }
 
@@ -335,6 +370,33 @@ function sanitizeResponsePreview(value: string): string {
     .replace(/\bsk-[a-z0-9_-]{12,}\b/gi, '[api-key omitted]')
 }
 
+function logDeepSeekRetry(
+  base: DeepSeekDiagnosticBase,
+  phase: 'response_parse' | 'empty_content',
+  metadata: DeepSeekResponseMetadata,
+): void {
+  console.warn('[雪风AI短剧工坊][DeepSeek] 响应异常，自动重试', compactDiagnostics({
+    diagnosticId: base.diagnosticId,
+    provider: 'deepseek',
+    model: base.model,
+    phase,
+    durationMs: Date.now() - base.startedAt,
+    attempt: metadata.attempt,
+    maxAttempts: metadata.maxAttempts,
+    httpStatus: metadata.httpStatus,
+    contentType: metadata.contentType,
+    providerRequestId: metadata.providerRequestId,
+    providerResponseId: metadata.providerResponseId,
+    rawResponseLength: metadata.rawResponseLength,
+    streamChunkCount: metadata.streamChunkCount,
+    choicesCount: metadata.choicesCount,
+    finishReason: metadata.finishReason,
+    contentLength: metadata.contentLength,
+    reasoningContentLength: metadata.reasoningContentLength,
+    malformedStreamEventCount: metadata.malformedStreamEventCount,
+  }))
+}
+
 function createDeepSeekError(
   message: string,
   base: DeepSeekDiagnosticBase,
@@ -349,6 +411,8 @@ function createDeepSeekError(
     model: base.model,
     phase,
     durationMs: Date.now() - base.startedAt,
+    attempt: metadata.attempt,
+    maxAttempts: metadata.maxAttempts,
     httpStatus: metadata.httpStatus,
     contentType: metadata.contentType,
     providerRequestId: metadata.providerRequestId,
@@ -359,6 +423,7 @@ function createDeepSeekError(
     finishReason: metadata.finishReason,
     contentLength: metadata.contentLength,
     reasoningContentLength: metadata.reasoningContentLength,
+    malformedStreamEventCount: metadata.malformedStreamEventCount,
     errorCode: metadata.errorCode,
   })
   console.error('[雪风AI短剧工坊][DeepSeek] 调用失败', {
@@ -424,6 +489,7 @@ async function collectStreamResponse(response: Response): Promise<DeepSeekCollec
   let rawResponseLength = 0
   let streamChunkCount = 0
   let choicesCount = 0
+  let malformedStreamEventCount = 0
   let providerError: DeepSeekCollectedResponse['providerError']
 
   const consumeLine = (line: string) => {
@@ -432,37 +498,45 @@ async function collectStreamResponse(response: Response): Promise<DeepSeekCollec
     const data = trimmed.slice(5).trim()
     if (!data || data === '[DONE]') return
 
-    const payload = asRecord(JSON.parse(data)) ?? {}
-    providerResponseId ||= readString(payload.id) || undefined
-    const error = asRecord(payload.error)
-    if (error) {
-      providerError = {
-        message: readString(error.message) || undefined,
-        code: readString(error.code) || undefined,
+    try {
+      const payload = asRecord(JSON.parse(data)) ?? {}
+      providerResponseId ||= readString(payload.id) || undefined
+      const error = asRecord(payload.error)
+      if (error) {
+        providerError = {
+          message: readString(error.message) || undefined,
+          code: readString(error.code) || undefined,
+        }
       }
+
+      const choices = Array.isArray(payload.choices) ? payload.choices : []
+      choicesCount = Math.max(choicesCount, choices.length)
+      const firstChoice = asRecord(choices[0])
+      const delta = asRecord(firstChoice?.delta)
+      content += readString(delta?.content)
+      reasoningContent += readString(delta?.reasoning_content)
+      if (typeof firstChoice?.finish_reason === 'string') finishReason = firstChoice.finish_reason
+    } catch {
+      malformedStreamEventCount += 1
     }
-
-    const choices = Array.isArray(payload.choices) ? payload.choices : []
-    choicesCount = Math.max(choicesCount, choices.length)
-    const firstChoice = asRecord(choices[0])
-    const delta = asRecord(firstChoice?.delta)
-    content += readString(delta?.content)
-    reasoningContent += readString(delta?.reasoning_content)
-    if (typeof firstChoice?.finish_reason === 'string') finishReason = firstChoice.finish_reason
   }
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    rawResponseLength += value.byteLength
-    streamChunkCount += 1
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-    lines.forEach(consumeLine)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      rawResponseLength += value.byteLength
+      streamChunkCount += 1
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      lines.forEach(consumeLine)
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) consumeLine(buffer)
+  } finally {
+    reader.releaseLock()
   }
-  buffer += decoder.decode()
-  if (buffer.trim()) consumeLine(buffer)
 
   return {
     content,
@@ -475,6 +549,7 @@ async function collectStreamResponse(response: Response): Promise<DeepSeekCollec
     finishReason,
     contentLength: content.length,
     reasoningContentLength: reasoningContent.length,
+    malformedStreamEventCount,
   }
 }
 

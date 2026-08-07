@@ -29,6 +29,7 @@ function generatedScriptResponse(content: string): Response {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
 })
@@ -189,8 +190,114 @@ describe('DeepSeek provider', () => {
     expect(result.brief).toBe('完整爽剧需求')
   })
 
-  it('空内容返回带诊断信息，且日志不泄露密钥和请求正文', async () => {
+  it('忽略单个异常 SSE 事件并继续收集有效 JSON', async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const optimized = JSON.stringify({
+      brief: '容错后仍然完整的需求',
+      genreDetected: '逆袭',
+      tips: [],
+    })
+    const stream = [
+      `data: ${JSON.stringify({ id: 'deepseek-response-tolerant', choices: [{ delta: { content: optimized.slice(0, 10) } }] })}`,
+      'data: provider-heartbeat',
+      `data: ${JSON.stringify({ choices: [{ delta: { content: optimized.slice(10) }, finish_reason: 'stop' }] })}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n')
+    const fetchMock = vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(optimizeScriptBrief({
+      brief: '一个普通人逆袭的故事。',
+      genre: '逆袭',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+    })).resolves.toMatchObject({ brief: '容错后仍然完整的需求' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[雪风AI短剧工坊][DeepSeek] 已忽略异常 SSE 事件',
+      expect.objectContaining({ malformedStreamEventCount: 1 }),
+    )
+  })
+
+  it('首次正式内容为空时强化 JSON 指令并自动重试', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const emptyStream = [
+      `data: ${JSON.stringify({ id: 'deepseek-response-empty-first', choices: [{ delta: { reasoning_content: '仅有推理' } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n')
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        brief: '第二次返回完整需求',
+        genreDetected: '逆袭',
+        tips: [],
+      }) } }],
+    }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(emptyStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(optimizeScriptBrief({
+      brief: '一个普通人逆袭的故事。',
+      genre: '逆袭',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+    })).resolves.toMatchObject({ brief: '第二次返回完整需求' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ content: string }>
+    }
+    const retryBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ content: string }>
+    }
+    expect(firstBody.messages[1]?.content).not.toContain('JSON 输出重试要求')
+    expect(retryBody.messages[1]?.content).toContain('只在 content 中输出一个完整 JSON 对象')
+  })
+
+  it('流读取失败时自动重试完整请求', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const brokenStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('模拟流中断'))
+      },
+    })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        brief: '重试后恢复',
+        genreDetected: '悬疑',
+        tips: [],
+      }) } }],
+    }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(brokenStream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }))
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(optimizeScriptBrief({
+      brief: '女记者追查真相。',
+      genre: '悬疑',
+      visualStyle: '电影感写实',
+      ratio: '9:16',
+    })).resolves.toMatchObject({ brief: '重试后恢复' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('连续两次空内容才返回诊断错误，且日志不泄露密钥和请求正文', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const stream = [
       `data: ${JSON.stringify({ id: 'deepseek-response-empty', choices: [{ delta: { reasoning_content: '仅有推理' } }] })}`,
       `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
@@ -198,10 +305,11 @@ describe('DeepSeek provider', () => {
       '',
     ].join('\n\n')
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-key-secret')
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, {
+    const fetchMock = vi.fn(async () => new Response(stream, {
       status: 200,
       headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'provider-request-empty' },
-    })))
+    }))
+    vi.stubGlobal('fetch', fetchMock)
 
     let failure: unknown
     try {
@@ -216,10 +324,13 @@ describe('DeepSeek provider', () => {
     }
 
     expect(failure).toBeInstanceOf(DiagnosticError)
+    expect((failure as Error).message).toBe('DeepSeek 连续两次返回内容为空')
     expect((failure as DiagnosticError).diagnostics).toMatchObject({
       provider: 'deepseek',
       model: DEEPSEEK_DEFAULT_MODEL,
       phase: 'empty_content',
+      attempt: 2,
+      maxAttempts: 2,
       httpStatus: 200,
       providerRequestId: 'provider-request-empty',
       providerResponseId: 'deepseek-response-empty',
@@ -228,6 +339,7 @@ describe('DeepSeek provider', () => {
       contentLength: 0,
       reasoningContentLength: 4,
     })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
     const logged = JSON.stringify(consoleError.mock.calls)
     expect(logged).not.toContain('test-key-secret')
     expect(logged).not.toContain('不可写入日志的用户故事正文')
