@@ -335,7 +335,7 @@ export function ScriptStep({ bundle, refresh }: Props) {
   }
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-5">
+    <div className="w-full space-y-5">
       <section className="panel overflow-hidden">
         <div className="grid lg:grid-cols-[1fr_360px]">
           <div className="p-5 md:p-6">
@@ -370,10 +370,8 @@ export function ScriptStep({ bundle, refresh }: Props) {
               )}
               {creativeBusy && (
                 <div className="mt-5 rounded-xl border border-[var(--projector)]/35 bg-[var(--projector)]/10 p-4" role="status">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="flex items-center gap-2 text-sm font-semibold"><Loader2 className="h-4 w-4 animate-spin text-[var(--projector)]" />{creativeStatus}</span>
-                    <span className="timecode flex shrink-0 items-center gap-1.5 text-[var(--timecode)]" aria-hidden="true"><Clock3 className="h-3.5 w-3.5" />{elapsedTime}</span>
-                  </div>
+                  <div className="flex items-center gap-2 text-sm font-semibold"><Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--projector)]" /><span>{creativeStatus}</span></div>
+                  <div className="timecode mt-2 flex items-center gap-1.5 pl-6 text-[var(--timecode)]" aria-hidden="true"><Clock3 className="h-3.5 w-3.5" />{elapsedTime}</div>
                   <p className="mt-2 text-xs leading-5 text-white/50">内容越长、分集越多，创作时间越久；完成后会自动刷新结果。</p>
                 </div>
               )}
