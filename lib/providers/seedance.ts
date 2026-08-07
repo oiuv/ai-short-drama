@@ -14,6 +14,8 @@ export interface SeedanceTaskStatus {
 }
 
 const API_URL = 'https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks'
+const CREATE_TASK_TIMEOUT_MS = 60_000
+const QUERY_TASK_TIMEOUT_MS = 30_000
 
 function apiKey(): string {
   const key = process.env.VOLCENGINE_API_KEY
@@ -48,6 +50,7 @@ export async function createSeedanceTask(input: {
       watermark: false,
       return_last_frame: true,
     }),
+    signal: AbortSignal.timeout(CREATE_TASK_TIMEOUT_MS),
   })
   const raw = await response.text()
   if (!response.ok) throw new Error(`Seedance API 错误 (${response.status}): ${raw.slice(0, 500)}`)
@@ -61,6 +64,7 @@ export async function querySeedanceTask(taskId: string): Promise<SeedanceTaskSta
   const response = await fetch(`${API_URL}/${encodeURIComponent(taskId)}`, {
     headers: { Authorization: `Bearer ${apiKey()}` },
     cache: 'no-store',
+    signal: AbortSignal.timeout(QUERY_TASK_TIMEOUT_MS),
   })
   const raw = await response.text()
   if (!response.ok) throw new Error(`Seedance 查询失败 (${response.status}): ${raw.slice(0, 500)}`)

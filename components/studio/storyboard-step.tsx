@@ -82,7 +82,7 @@ export function StoryboardStep({ bundle, refresh }: Props) {
     }
     if (shots.length && !await confirmToast({
       title: '重新拆分本集分镜？',
-      description: '本集现有镜头及视频版本将从工作区隐藏；数据库记录与本地视频文件都会保留。',
+      description: '本集现有镜头、视频版本记录和剪辑草稿将被替换；本地视频与已导出文件仍会保留。',
       confirmLabel: '重新拆分',
     })) return
     setSplitting(true)
@@ -204,6 +204,7 @@ function ShotCard({ shot, entities, selected, locked, onToggleSelected, onDirtyC
   const [saving, setSaving] = useState(false)
   const [generating, setGenerating] = useState(false)
   const dirty = prompt !== shot.prompt || duration !== shot.duration || JSON.stringify(referenceIds) !== JSON.stringify(shot.referenceEntityIds)
+  const editLocked = locked || shot.status === 'generating'
 
   useEffect(() => {
     onDirtyChange(shot.id, dirty)
@@ -237,7 +238,7 @@ function ShotCard({ shot, entities, selected, locked, onToggleSelected, onDirtyC
   const remove = async () => {
     if (!await confirmToast({
       title: `删除镜头 ${shot.shotOrder}？`,
-      description: '该镜头及其视频版本将从工作区隐藏；数据库记录与本地视频文件都会保留。',
+      description: '该镜头及其视频版本记录将被删除，剪辑草稿会移除这个镜头；本地视频与已导出文件仍会保留。',
       confirmLabel: '删除镜头',
     })) return
     try {
@@ -271,7 +272,7 @@ function ShotCard({ shot, entities, selected, locked, onToggleSelected, onDirtyC
   const removeVideo = async (videoId: string) => {
     if (!await confirmToast({
       title: '删除这个视频版本？',
-      description: '该版本将从工作区隐藏，本地视频文件保留；若它是当前版本，将自动切换到最近版本。',
+      description: '该版本将软删除且本地视频保留；若是当前版本，有其他版本会自动切换并保留剪辑布局，否则剪辑草稿会移除该镜头。已有成片需重新导出。',
       confirmLabel: '删除版本',
     })) return
     try {
@@ -295,15 +296,15 @@ function ShotCard({ shot, entities, selected, locked, onToggleSelected, onDirtyC
             <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold"><input type="checkbox" checked={selected} disabled={locked} onChange={onToggleSelected} /> 批量选择</label>
             <span className="timecode rounded-md bg-[var(--navy)] px-2.5 py-1 text-xs text-white">SHOT {String(shot.shotOrder).padStart(2, '0')}</span>
             <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${statusStyle}`}>{shot.status === 'success' ? '已完成' : shot.status === 'generating' ? '生成中' : shot.status === 'failed' ? '失败' : '待生成'}</span>
-            <label className="ml-auto flex items-center gap-2 text-xs text-[var(--muted)]">时长 <input type="number" min={4} max={15} className="field !w-20 !py-1.5" value={duration} onChange={e => setDuration(Math.max(4, Math.min(15, Number(e.target.value) || 4)))} /> 秒</label>
+            <label className="ml-auto flex items-center gap-2 text-xs text-[var(--muted)]">时长 <input type="number" min={4} max={15} className="field !w-20 !py-1.5" value={duration} disabled={editLocked} onChange={e => setDuration(Math.max(4, Math.min(15, Number(e.target.value) || 4)))} /> 秒</label>
           </div>
-          <label className="mt-4 block"><span className="label">Seedance 提示词</span><textarea className="field min-h-36 resize-y leading-6" value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="主体、动作、台词、景别、运镜、光线与声音…" /></label>
+          <label className="mt-4 block"><span className="label">Seedance 提示词</span><textarea className="field min-h-36 resize-y leading-6" value={prompt} disabled={editLocked} onChange={e => setPrompt(e.target.value)} placeholder="主体、动作、台词、景别、运镜、光线与声音…" /></label>
           <div className="mt-4">
             <div className="label">Base64 参考素材 · 最多 9 张</div>
             <div className="flex flex-wrap gap-2">
               {entities.map(entity => {
                 const selected = referenceIds.includes(entity.id)
-                return <button key={entity.id} onClick={() => setReferenceIds(current => selected ? current.filter(id => id !== entity.id) : current.length < 9 ? [...current, entity.id] : current)} className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs ${selected ? 'border-[var(--projector)] bg-[var(--projector)]/10' : 'border-[var(--line)] bg-white'}`}><img src={entity.selectedImage!.url} alt="" className="h-7 w-7 rounded object-cover" /><span>{entity.name}{entity.variant ? ` / ${entity.variant}` : ''}</span></button>
+                return <button key={entity.id} disabled={editLocked} onClick={() => setReferenceIds(current => selected ? current.filter(id => id !== entity.id) : current.length < 9 ? [...current, entity.id] : current)} className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs ${selected ? 'border-[var(--projector)] bg-[var(--projector)]/10' : 'border-[var(--line)] bg-white'}`}><img src={entity.selectedImage!.url} alt="" className="h-7 w-7 rounded object-cover" /><span>{entity.name}{entity.variant ? ` / ${entity.variant}` : ''}</span></button>
               })}
               {!entities.length && <span className="text-xs text-[var(--muted)]">本集暂无已定稿图片，仍可纯文本生成。</span>}
             </div>
@@ -320,7 +321,7 @@ function ShotCard({ shot, entities, selected, locked, onToggleSelected, onDirtyC
           <div className="flex aspect-video items-center justify-center overflow-hidden rounded-xl bg-black/45">
             {shot.selectedVideo?.url ? <video key={shot.selectedVideo.url} src={shot.selectedVideo.url} controls preload="metadata" className="h-full w-full object-contain" /> : shot.status === 'generating' ? <div className="text-center text-xs text-white/60"><Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-[var(--projector)]" />Seedance 正在制作</div> : <Video className="h-10 w-10 text-white/15" />}
           </div>
-          {completeVideos.length > 0 && <div className="mt-3 flex gap-2 overflow-x-auto">{completeVideos.map((video, index) => <button key={video.id} onClick={() => void selectVideo(video.id)} className={`timecode rounded-lg border px-3 py-2 text-[10px] ${video.id === activeVideo?.id ? 'border-[var(--projector)] bg-[var(--projector)]/10 text-[var(--projector)]' : 'border-white/10 text-white/50'}`}>TAKE {String(index + 1).padStart(2, '0')}</button>)}</div>}
+          {completeVideos.length > 0 && <div className="mt-3 flex gap-2 overflow-x-auto">{completeVideos.map((video, index) => <button key={video.id} disabled={editLocked} onClick={() => void selectVideo(video.id)} className={`timecode rounded-lg border px-3 py-2 text-[10px] ${video.id === activeVideo?.id ? 'border-[var(--projector)] bg-[var(--projector)]/10 text-[var(--projector)]' : 'border-white/10 text-white/50'}`}>TAKE {String(index + 1).padStart(2, '0')}</button>)}</div>}
           {activeVideo && (
             <div className="mt-3 space-y-3 rounded-xl border border-white/10 bg-white/[.04] p-3 text-xs text-white/65">
               <div className="flex items-start justify-between gap-3">
@@ -328,9 +329,9 @@ function ShotCard({ shot, entities, selected, locked, onToggleSelected, onDirtyC
                 <button className="btn-quiet !min-h-7 !px-1.5 !text-white/50 hover:!text-red-300" disabled={locked || shot.status === 'generating'} onClick={() => void removeVideo(activeVideo.id)} title="删除当前视频版本"><Trash2 className="h-3.5 w-3.5" /></button>
               </div>
               <div className="flex items-center gap-1" aria-label="视频版本评分">
-                {[1, 2, 3, 4, 5].map(star => <button key={star} className={`text-base ${(activeVideo.rating ?? 0) >= star ? 'text-amber-300' : 'text-white/20'} hover:text-amber-200`} onClick={() => void updateVideo(activeVideo.id, { rating: activeVideo.rating === star ? null : star })} aria-label={`${star} 星`}>★</button>)}
+                {[1, 2, 3, 4, 5].map(star => <button key={star} disabled={editLocked} className={`text-base ${(activeVideo.rating ?? 0) >= star ? 'text-amber-300' : 'text-white/20'} hover:text-amber-200`} onClick={() => void updateVideo(activeVideo.id, { rating: activeVideo.rating === star ? null : star })} aria-label={`${star} 星`}>★</button>)}
               </div>
-              <input className="w-full rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs text-white placeholder:text-white/30 focus:border-[var(--projector)] focus:outline-none" defaultValue={activeVideo.note} maxLength={200} placeholder="给这个版本添加备注…" onBlur={event => { const note = event.target.value.trim(); if (note !== activeVideo.note) void updateVideo(activeVideo.id, { note }) }} />
+              <input className="w-full rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs text-white placeholder:text-white/30 focus:border-[var(--projector)] focus:outline-none" defaultValue={activeVideo.note} disabled={editLocked} maxLength={200} placeholder="给这个版本添加备注…" onBlur={event => { const note = event.target.value.trim(); if (note !== activeVideo.note) void updateVideo(activeVideo.id, { note }) }} />
               <details><summary className="cursor-pointer text-white/55 hover:text-white">查看生成提示词快照</summary><p className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap leading-5 text-white/55">{activeVideo.prompt || '该版本没有提示词快照'}</p></details>
             </div>
           )}

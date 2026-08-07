@@ -44,16 +44,7 @@ function placeholders(ids: string[]): string {
   return ids.map(() => '?').join(', ')
 }
 
-function archiveEditEpisodeIds(db: Database.Database, episodeIds: string[], timestamp: string): void {
-  if (!episodeIds.length) return
-  const values = placeholders(episodeIds)
-  db.prepare(`
-    UPDATE edits SET deleted_at = ?, updated_at = ?
-    WHERE deleted_at IS NULL AND episode_id IN (${values})
-  `).run(timestamp, timestamp, ...episodeIds)
-}
-
-function archiveShotIds(db: Database.Database, shotIds: string[], timestamp: string): void {
+function assertShotsIdle(db: Database.Database, shotIds: string[]): void {
   if (!shotIds.length) return
   const values = placeholders(shotIds)
   const generating = db.prepare(`
@@ -62,51 +53,40 @@ function archiveShotIds(db: Database.Database, shotIds: string[], timestamp: str
     LIMIT 1
   `).get(...shotIds)
   if (generating) throw new Error('仍有视频正在生成，完成后才能删除或替换相关内容')
-  const episodeIds = (db.prepare(`
-    SELECT DISTINCT episode_id FROM shots
-    WHERE deleted_at IS NULL AND id IN (${values})
-  `).all(...shotIds) as SqlRow[]).map(row => String(row.episode_id))
-  archiveEditEpisodeIds(db, episodeIds, timestamp)
+}
+
+function invalidateEditOutput(db: Database.Database, episodeId: string, timestamp: string): void {
   db.prepare(`
-    UPDATE shot_videos SET deleted_at = ?
-    WHERE deleted_at IS NULL AND shot_id IN (${values})
-  `).run(timestamp, ...shotIds)
+    UPDATE edits SET output_path = NULL, updated_at = ?
+    WHERE episode_id = ? AND deleted_at IS NULL
+  `).run(timestamp, episodeId)
+}
+
+function removeShotsFromEdit(db: Database.Database, episodeId: string, shotIds: string[], timestamp: string): void {
+  if (!shotIds.length) return
+  const edit = db.prepare(`
+    SELECT clips_json FROM edits WHERE episode_id = ? AND deleted_at IS NULL
+  `).get(episodeId) as SqlRow | undefined
+  if (!edit) return
+  const removed = new Set(shotIds)
+  const clips = parseJson<EditClip[]>(edit.clips_json, []).filter(clip => !removed.has(clip.shotId))
+  db.prepare(`
+    UPDATE edits SET clips_json = ?, output_path = NULL, updated_at = ?
+    WHERE episode_id = ? AND deleted_at IS NULL
+  `).run(JSON.stringify(clips), timestamp, episodeId)
+}
+
+const STALE_SHOT_SUBMISSION_MS = 2 * 60 * 1000
+
+function recoverStaleShotSubmissions(db: Database.Database, projectId: string): void {
+  const timestamp = now()
+  const staleBefore = new Date(Date.now() - STALE_SHOT_SUBMISSION_MS).toISOString()
   db.prepare(`
     UPDATE shots
-    SET deleted_at = ?, deleted_shot_order = shot_order, shot_order = -rowid,
-      updated_at = ?
-    WHERE deleted_at IS NULL AND id IN (${values})
-  `).run(timestamp, timestamp, ...shotIds)
-}
-
-function archiveEpisodeIds(db: Database.Database, episodeIds: string[], timestamp: string): void {
-  if (!episodeIds.length) return
-  const values = placeholders(episodeIds)
-  const shotIds = (db.prepare(`
-    SELECT id FROM shots WHERE deleted_at IS NULL AND episode_id IN (${values})
-  `).all(...episodeIds) as SqlRow[]).map(row => String(row.id))
-  archiveShotIds(db, shotIds, timestamp)
-  archiveEditEpisodeIds(db, episodeIds, timestamp)
-  db.prepare(`
-    UPDATE episodes
-    SET deleted_at = ?, deleted_episode_number = episode_number,
-      episode_number = -rowid, updated_at = ?
-    WHERE deleted_at IS NULL AND id IN (${values})
-  `).run(timestamp, timestamp, ...episodeIds)
-}
-
-function archiveEntityIds(db: Database.Database, entityIds: string[], timestamp: string): void {
-  if (!entityIds.length) return
-  const values = placeholders(entityIds)
-  db.prepare(`
-    UPDATE entity_images SET deleted_at = ?
-    WHERE deleted_at IS NULL AND entity_id IN (${values})
-  `).run(timestamp, ...entityIds)
-  db.prepare(`
-    UPDATE entities
-    SET deleted_at = ?, updated_at = ?
-    WHERE deleted_at IS NULL AND id IN (${values})
-  `).run(timestamp, timestamp, ...entityIds)
+    SET status = 'failed', error = '任务提交中断，请重新生成', updated_at = ?
+    WHERE project_id = ? AND deleted_at IS NULL AND status = 'generating'
+      AND provider_task_id IS NULL AND updated_at < ?
+  `).run(timestamp, projectId, staleBefore)
 }
 
 function initialize(db: Database.Database): void {
@@ -378,30 +358,19 @@ export function updateProject(id: string, fields: Partial<Pick<Project, 'title' 
 
 export function deleteProject(id: string): boolean {
   const db = getDb()
-  const exists = db.prepare('SELECT id FROM projects WHERE id = ? AND deleted_at IS NULL').get(id)
-  if (!exists) return false
-  const archive = db.transaction(() => {
-    const timestamp = now()
-    const episodeIds = (db.prepare(`
-      SELECT id FROM episodes WHERE project_id = ? AND deleted_at IS NULL
-    `).all(id) as SqlRow[]).map(row => String(row.id))
-    const entityIds = (db.prepare(`
-      SELECT id FROM entities WHERE project_id = ? AND deleted_at IS NULL
-    `).all(id) as SqlRow[]).map(row => String(row.id))
-    archiveEpisodeIds(db, episodeIds, timestamp)
-    archiveEntityIds(db, entityIds, timestamp)
-    db.prepare(`
-      UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL
-    `).run(timestamp, timestamp, id)
-  })
-  archive()
-  return true
+  recoverStaleShotSubmissions(db, id)
+  const shotIds = (db.prepare(`
+    SELECT id FROM shots WHERE project_id = ? AND deleted_at IS NULL
+  `).all(id) as SqlRow[]).map(row => String(row.id))
+  assertShotsIdle(db, shotIds)
+  return db.prepare('DELETE FROM projects WHERE id = ? AND deleted_at IS NULL').run(id).changes > 0
 }
 
 export function getProjectBundle(projectId: string): ProjectBundle | null {
   const db = getDb()
   const project = getProject(projectId)
   if (!project) return null
+  recoverStaleShotSubmissions(db, projectId)
 
   const episodes = (db.prepare(`
     SELECT * FROM episodes WHERE project_id = ? AND deleted_at IS NULL ORDER BY episode_number
@@ -647,6 +616,7 @@ export function replaceGeneratedScript(
 ): ProjectBundle {
   const db = getDb()
   const transaction = db.transaction(() => {
+    recoverStaleShotSubmissions(db, projectId)
     const timestamp = now()
     db.prepare(`
       UPDATE projects SET title = ?, synopsis = ?, genre = ?, planned_episodes = ?, updated_at = ? WHERE id = ?
@@ -654,11 +624,15 @@ export function replaceGeneratedScript(
     const episodeIds = (db.prepare(`
       SELECT id FROM episodes WHERE project_id = ? AND deleted_at IS NULL
     `).all(projectId) as SqlRow[]).map(row => String(row.id))
-    const entityIds = (db.prepare(`
-      SELECT id FROM entities WHERE project_id = ? AND deleted_at IS NULL
-    `).all(projectId) as SqlRow[]).map(row => String(row.id))
-    archiveEpisodeIds(db, episodeIds, timestamp)
-    archiveEntityIds(db, entityIds, timestamp)
+    const episodeValues = placeholders(episodeIds)
+    const shotIds = episodeIds.length
+      ? (db.prepare(`
+          SELECT id FROM shots WHERE deleted_at IS NULL AND episode_id IN (${episodeValues})
+        `).all(...episodeIds) as SqlRow[]).map(row => String(row.id))
+      : []
+    assertShotsIdle(db, shotIds)
+    db.prepare('DELETE FROM episodes WHERE project_id = ? AND deleted_at IS NULL').run(projectId)
+    db.prepare('DELETE FROM entities WHERE project_id = ? AND deleted_at IS NULL').run(projectId)
     insertGeneratedEpisodes(db, projectId, script.episodes, timestamp)
     mergeGeneratedEntities(db, projectId, script, timestamp)
   })
@@ -703,6 +677,7 @@ export function rewriteGeneratedScript(
 ): ProjectBundle {
   const db = getDb()
   const transaction = db.transaction(() => {
+    recoverStaleShotSubmissions(db, projectId)
     const endEpisode = startEpisode + script.episodes.length - 1
     const targets = db.prepare(`
       SELECT id, episode_number FROM episodes
@@ -727,8 +702,9 @@ export function rewriteGeneratedScript(
     const shotIds = (db.prepare(`
       SELECT id FROM shots WHERE deleted_at IS NULL AND episode_id IN (${values})
     `).all(...targetIds) as SqlRow[]).map(row => String(row.id))
-    archiveShotIds(db, shotIds, timestamp)
-    archiveEditEpisodeIds(db, targetIds, timestamp)
+    assertShotsIdle(db, shotIds)
+    db.prepare(`DELETE FROM shots WHERE deleted_at IS NULL AND episode_id IN (${values})`).run(...targetIds)
+    db.prepare(`DELETE FROM edits WHERE deleted_at IS NULL AND episode_id IN (${values})`).run(...targetIds)
     db.prepare(`
       UPDATE projects SET synopsis = ?, genre = ?, updated_at = ? WHERE id = ?
     `).run(script.project.synopsis, script.project.genre, timestamp, projectId)
@@ -775,10 +751,16 @@ export function updateEpisode(id: string, fields: Partial<Pick<Episode, 'title' 
 
 export function deleteEpisode(id: string): boolean {
   const db = getDb()
-  const episode = db.prepare('SELECT id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(id)
+  const episode = db.prepare(`
+    SELECT id, project_id FROM episodes WHERE id = ? AND deleted_at IS NULL
+  `).get(id) as SqlRow | undefined
   if (!episode) return false
-  db.transaction(() => archiveEpisodeIds(db, [id], now()))()
-  return true
+  recoverStaleShotSubmissions(db, String(episode.project_id))
+  const shotIds = (db.prepare(`
+    SELECT id FROM shots WHERE episode_id = ? AND deleted_at IS NULL
+  `).all(id) as SqlRow[]).map(row => String(row.id))
+  assertShotsIdle(db, shotIds)
+  return db.prepare('DELETE FROM episodes WHERE id = ? AND deleted_at IS NULL').run(id).changes > 0
 }
 
 export function createEntity(projectId: string, input: {
@@ -835,11 +817,7 @@ export function updateEntity(id: string, fields: Partial<Pick<Entity, 'name' | '
 }
 
 export function deleteEntity(id: string): boolean {
-  const db = getDb()
-  const entity = db.prepare('SELECT id FROM entities WHERE id = ? AND deleted_at IS NULL').get(id)
-  if (!entity) return false
-  db.transaction(() => archiveEntityIds(db, [id], now()))()
-  return true
+  return getDb().prepare('DELETE FROM entities WHERE id = ? AND deleted_at IS NULL').run(id).changes > 0
 }
 
 export function addEntityImage(entityId: string, imagePath: string, prompt: string): Entity {
@@ -847,6 +825,10 @@ export function addEntityImage(entityId: string, imagePath: string, prompt: stri
   const id = randomUUID()
   const timestamp = now()
   const transaction = db.transaction(() => {
+    const entity = db.prepare(`
+      SELECT id FROM entities WHERE id = ? AND deleted_at IS NULL
+    `).get(entityId)
+    if (!entity) throw new Error('素材不存在或已删除')
     db.prepare('INSERT INTO entity_images (id, entity_id, path, prompt, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(id, entityId, imagePath, prompt, timestamp)
     db.prepare('UPDATE entities SET selected_image_id = ?, updated_at = ? WHERE id = ?')
@@ -922,6 +904,7 @@ export function replaceStoryboard(projectId: string, episodeId: string, shots: A
 }>): Shot[] {
   const db = getDb()
   const transaction = db.transaction(() => {
+    recoverStaleShotSubmissions(db, projectId)
     const generating = db.prepare(`
       SELECT id FROM shots
       WHERE episode_id = ? AND deleted_at IS NULL AND status = 'generating'
@@ -932,7 +915,9 @@ export function replaceStoryboard(projectId: string, episodeId: string, shots: A
       SELECT id FROM shots WHERE episode_id = ? AND deleted_at IS NULL
     `).all(episodeId) as SqlRow[]).map(row => String(row.id))
     const timestamp = now()
-    archiveShotIds(db, existingIds, timestamp)
+    assertShotsIdle(db, existingIds)
+    db.prepare('DELETE FROM edits WHERE episode_id = ? AND deleted_at IS NULL').run(episodeId)
+    db.prepare('DELETE FROM shots WHERE episode_id = ? AND deleted_at IS NULL').run(episodeId)
     const insert = db.prepare(`
       INSERT INTO shots (
         id, project_id, episode_id, shot_order, prompt, duration, reference_entity_ids_json,
@@ -1000,11 +985,14 @@ export function updateShot(id: string, fields: Partial<Pick<Shot, 'prompt' | 'du
 export function deleteShot(id: string): boolean {
   const db = getDb()
   const row = db.prepare(`
-    SELECT episode_id, shot_order FROM shots WHERE id = ? AND deleted_at IS NULL
+    SELECT project_id, episode_id, shot_order FROM shots WHERE id = ? AND deleted_at IS NULL
   `).get(id) as SqlRow | undefined
   if (!row) return false
+  recoverStaleShotSubmissions(db, String(row.project_id))
   const transaction = db.transaction(() => {
-    archiveShotIds(db, [id], now())
+    assertShotsIdle(db, [id])
+    removeShotsFromEdit(db, String(row.episode_id), [id], now())
+    db.prepare('DELETE FROM shots WHERE id = ? AND deleted_at IS NULL').run(id)
     const remaining = db.prepare(`
       SELECT id FROM shots WHERE episode_id = ? AND deleted_at IS NULL ORDER BY shot_order
     `).all(row.episode_id) as SqlRow[]
@@ -1133,7 +1121,8 @@ export function deleteShotVideo(shotId: string, videoId: string): { shot: Shot; 
     `).get(shotId) as SqlRow
     const selectedVideoId = shot.selected_video_id ? String(shot.selected_video_id) : null
     if (selectedVideoId === videoId) {
-      archiveEditEpisodeIds(db, [String(shot.episode_id)], timestamp)
+      if (replacement) invalidateEditOutput(db, String(shot.episode_id), timestamp)
+      else removeShotsFromEdit(db, String(shot.episode_id), [shotId], timestamp)
       db.prepare(`
         UPDATE shots SET selected_video_id = ?, status = ?, updated_at = ? WHERE id = ?
       `).run(

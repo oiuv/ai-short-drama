@@ -50,7 +50,7 @@ export function Dashboard() {
   const remove = async (project: ProjectListItem) => {
     if (!await confirmToast({
       title: '删除整个项目？',
-      description: `《${project.title}》及其剧本、素材档案、分镜和剪辑记录将从片库隐藏；数据库记录与本地素材文件保留。`,
+      description: `《${project.title}》及其剧本、素材档案、分镜和剪辑记录将被删除；本地图片、视频与已导出文件仍会保留。`,
       confirmLabel: '删除项目',
     })) return
     try {

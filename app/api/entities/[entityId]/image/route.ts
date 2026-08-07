@@ -42,6 +42,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ ent
     })
     return ok(addEntityImage(entity.id, result.path, result.prompt))
   } catch (error) {
-    return fail(error, error instanceof z.ZodError ? 400 : 500)
+    const status = error instanceof z.ZodError
+      ? 400
+      : error instanceof Error && error.message.includes('素材不存在或已删除')
+        ? 404
+        : 500
+    return fail(error, status)
   }
 }

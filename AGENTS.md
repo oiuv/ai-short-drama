@@ -29,8 +29,8 @@ This repository is not a continuously operated online service. Runtime applicati
 - Migrations have no automatic rollback/down path. If a change cannot be migrated safely, document that limitation and require a backed-up clean data directory.
 - Runtime startup and `db:init` must not auto-run maintenance migrations. Run `npm run db:migrate` explicitly while the application is stopped, then restart it.
 - Migration tests must use a temporary `DATA_DIR`, run the same migration at least twice, and assert that existing data remains unchanged.
-- All application-level deletion and replacement of projects, episodes, entity records, shots, edit drafts, and image/video versions must use database soft deletion. Default runtime reads must exclude soft-deleted rows.
-- Persistent local images, videos, and exported films are never physically removed by application deletion or regeneration. Keep their relative paths in the soft-deleted database records; temporary working files may still be cleaned after their operation finishes.
+- Only individual image and video version records use database soft deletion; default media-version reads must exclude those rows. Projects, episodes, entity descriptions, shots, and edit drafts are current-state text/workflow records and do not retain historical versions when deleted, regenerated, or rewritten.
+- Persistent local images, videos, and exported films are never physically removed by application deletion or regeneration. Parent workflow records may be deleted normally; temporary working files may still be cleaned after their operation finishes.
 
 ## XuefengAI Reference Boundary
 
